@@ -184,88 +184,49 @@ body{font-family:system-ui,sans-serif;background:#f0ede6;color:#1a1a1a;height:10
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <script src="https://unpkg.com/leaflet-routing-machine@3.2.12/dist/leaflet-routing-machine.js"></script>
 <script>
-// ── ORS Router per LRM ──────────────────────────────────────────────
-L.Routing.ORS = L.Class.extend({
-  initialize(filters){this._filters=filters;this._cancelled=false;},
-  route(waypoints,cb){
-    this._cancelled=false;
-    const safeCb=(err,routes)=>{if(!this._cancelled) cb(err,routes);};
-    const coords=waypoints.map(w=>[
-      parseFloat(w.latLng.lng.toFixed(6)),
-      parseFloat(w.latLng.lat.toFixed(6))
-    ]);
-    const body={
-      coordinates:coords,
-      preference:'recommended',
-      geometry:true,
-      instructions:true,
-      elevation:false,
-      units:'km',
-      language:'it'
-    };
-    const av=[];
-    if(this._filters.motorway) av.push('highways');
-    if(this._filters.toll) av.push('tollways');
-    if(this._filters.ferry) av.push('ferries');
-    if(av.length) body.options={avoid_features:av};
+// ── ORS fetch diretto (non LRM router) ─────────────────────────────
+async function calcORS(waypoints, filters){
+  const coords = waypoints.map(w=>[
+    parseFloat(w.latlng.lng.toFixed(6)),
+    parseFloat(w.latlng.lat.toFixed(6))
+  ]);
+  const body = {
+    coordinates: coords,
+    preference: 'recommended',
+    geometry: true,
+    instructions: true,
+    elevation: false,
+    units: 'km',
+    language: 'it'
+  };
+  const av = [];
+  if(filters.motorway) av.push('highways');
+  if(filters.toll) av.push('tollways');
+  if(filters.ferry) av.push('ferries');
+  if(av.length) body.options = {avoid_features: av};
 
-    fetch('https://api.openrouteservice.org/v2/directions/driving-car/geojson',{
-      method:'POST',
-      headers:{
-        'Content-Type':'application/json',
-        'Authorization':'eyJvcmciOiI1YjNjZTM1OTc4NTExMTAwMDFjZjYyNDgiLCJpZCI6ImRlYzJkMzdjOTMxNDQ2MGZiZjFkZGMwMDM3NTU5YjJkIiwiaCI6Im11cm11cjY0In0='
-      },
-      body:JSON.stringify(body)
-    })
-    .then(r=>{if(!r.ok) throw new Error(r.status); return r.json();})
-    .then(data=>{
-      if(!data.features||!data.features.length) throw new Error('no route');
-      const feat=data.features[0];
-      const geom=feat.geometry.coordinates;
-      const props=feat.properties;
-      const summary=props.summary;
+  const r = await fetch('https://api.openrouteservice.org/v2/directions/driving-car/geojson', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': 'eyJvcmciOiI1YjNjZTM1OTc4NTExMTAwMDFjZjYyNDgiLCJpZCI6ImRlYzJkMzdjOTMxNDQ2MGZiZjFkZGMwMDM3NTU5YjJkIiwiaCI6Im11cm11cjY0In0='
+    },
+    body: JSON.stringify(body)
+  });
+  if(!r.ok) throw new Error('ORS '+r.status);
+  const data = await r.json();
+  if(!data.features||!data.features.length) throw new Error('no route');
+  return data.features[0];
+}
 
-      // Costruisce routes nel formato LRM
-      const routes=[{
-        name:'',
-        summary:{totalDistance:summary.distance*1000,totalTime:summary.duration},
-        coordinates:geom.map(c=>L.latLng(c[1],c[0])),
-        waypoints:waypoints,
-        instructions:[],
-        inputWaypoints:waypoints,
-        waypointIndices:[0,geom.length-1],
-        legs:props.segments||[]
-      }];
-      // Salva legs per stats
-      state._orsLegs=props.segments||[];
-      state._orsSteps=(props.segments||[]).flatMap(s=>s.steps||[]);
-      safeCb(null,routes);
-    })
-    .catch(err=>{
-      console.warn('ORS error:',err.message,'. Fallback OSRM...');
-      // Fallback OSRM
-      const c=waypoints.map(w=>`${w.latLng.lng.toFixed(6)},${w.latLng.lat.toFixed(6)}`).join(';');
-      fetch(`https://routing.openstreetmap.de/routed-car/route/v1/driving/${c}?overview=full&geometries=geojson&steps=false`)
-        .then(r=>r.json())
-        .then(data=>{
-          if(data.code!=='Ok') throw new Error('osrm fail');
-          const route=data.routes[0];
-          const geom=route.geometry.coordinates;
-          const routes=[{
-            name:'',
-            summary:{totalDistance:route.distance,totalTime:route.duration},
-            coordinates:geom.map(c=>L.latLng(c[1],c[0])),
-            waypoints,inputWaypoints:waypoints,
-            waypointIndices:[0,geom.length-1],
-            instructions:[],legs:[]
-          }];
-          state._orsLegs=[];state._orsSteps=[];
-          safeCb(null,routes);
-        })
-        .catch(e=>safeCb(e));
-    });
-  }
-});
+async function calcOSRM(waypoints){
+  const coords = waypoints.map(w=>`${w.latlng.lng.toFixed(6)},${w.latlng.lat.toFixed(6)}`).join(';');
+  const r = await fetch(`https://routing.openstreetmap.de/routed-car/route/v1/driving/${coords}?overview=full&geometries=geojson&steps=false`);
+  if(!r.ok) throw new Error('OSRM '+r.status);
+  const data = await r.json();
+  if(data.code!=='Ok'||!data.routes||!data.routes.length) throw new Error('no route');
+  return data.routes[0];
+}
 
 // ── State ────────────────────────────────────────────────────────────
 const COLORS=['#185FA5','#1D9E75','#BA7517','#993556','#534AB7','#D85A30'];
@@ -279,7 +240,7 @@ const state={
   ctrl:null,
   softOpen:false,
   importedLayer:null,importedCoords:[],importedWptMarkers:[],
-  _orsLegs:[],_orsSteps:[]
+  routeLine:null,_orsLegs:[],_orsSteps:[]
 };
 
 // ── Map ──────────────────────────────────────────────────────────────
@@ -454,64 +415,97 @@ function addWp(latlng,type,pos){
   refreshMarkers();renderSidebar();rebuildRoute();
 }
 
-// ── LRM Routing ──────────────────────────────────────────────────────
-function rebuildRoute(){
-  const wps=awps();
-  if(wps.length<2){
-    if(state.ctrl){map.removeControl(state.ctrl);state.ctrl=null;}
+// ── Routing ─────────────────────────────────────────────────────────
+state.routeCoords = [];
+
+async function rebuildRoute(){
+  const wps = awps();
+  // Pulisci route precedente
+  if(state.ctrl){map.removeControl(state.ctrl);state.ctrl=null;}
+  if(state.routeLine){map.removeLayer(state.routeLine);state.routeLine=null;}
+
+  if(wps.length < 2){
     document.getElementById('s-dist').textContent='—';
     document.getElementById('s-time').textContent='—';
     document.getElementById('seg-list').innerHTML='';
     return;
   }
-  if(state.ctrl){
-    // Cancella eventuali richieste pendenti prima di rimuovere
-    if(state.ctrl._router) state.ctrl._router._cancelled=true;
-    map.removeControl(state.ctrl);state.ctrl=null;
-  }
 
-  const router=new L.Routing.ORS(state.filters);
-
-  state._router=router;
-  state.ctrl=L.Routing.control({
-    waypoints:wps.map(w=>L.Routing.waypoint(L.latLng(w.latlng))),
-    router,
-    // LRM gestisce inserimento waypoint nel segmento corretto
-    addWaypoints:true,
-    draggableWaypoints:true,
-    routeWhileDragging:false,
-    show:false,
-    fitSelectedRoutes:false,
-    createMarker:()=>null,
-    lineOptions:{
-      styles:[{color:lcolor(),weight:5,opacity:0.85}],
-      extendToWaypoints:true,
-      missingRouteTolerance:10
-    }
+  // LRM solo per drag della linea — usa OSRM come router interno
+  // (non mostriamo la sua linea, la disegniamo noi con ORS)
+  const lrmWps = wps.map(w=>L.Routing.waypoint(L.latLng(w.latlng)));
+  state.ctrl = L.Routing.control({
+    waypoints: lrmWps,
+    router: L.Routing.osrmv1({
+      serviceUrl: 'https://routing.openstreetmap.de/routed-car/route/v1',
+      profile: 'car',
+      suppressDemoServerWarning: true
+    }),
+    lineOptions: {styles:[{opacity:0}], extendToWaypoints:false, missingRouteTolerance:10},
+    createMarker: ()=>null,
+    addWaypoints: true,
+    draggableWaypoints: true,
+    show: false,
+    fitSelectedRoutes: false,
+    routeWhileDragging: false
   }).addTo(map);
 
-  // Quando LRM aggiunge/sposta waypoint via drag linea
-  state.ctrl.on('waypointschanged',e=>{
-    syncLRM(e.waypoints);
+  // Quando LRM modifica waypoint (drag linea o drag marker)
+  state.ctrl.on('waypointschanged', e=>{
+    if(!_syncing) syncLRM(e.waypoints);
   });
 
-  state.ctrl.on('routesfound',e=>{
-    const r=e.routes[0];
-    const dist=(r.summary.totalDistance/1000).toFixed(1);
-    const tot=Math.round(r.summary.totalTime/60);
-    document.getElementById('s-dist').textContent=dist;
-    document.getElementById('s-time').textContent=`${Math.floor(tot/60)}h ${tot%60}m`;
+  // Calcola il percorso vero con ORS
+  document.getElementById('s-dist').textContent='…';
+  document.getElementById('s-time').textContent='…';
+
+  try {
+    let feat;
+    try {
+      feat = await calcORS(wps.map(w=>({latlng:w.latlng})), state.filters);
+    } catch(orsErr) {
+      console.warn('ORS fallback OSRM:', orsErr.message);
+      toast('ORS non disponibile — uso OSRM (senza filtri stradali)');
+      const osrmRoute = await calcOSRM(wps.map(w=>({latlng:w.latlng})));
+      // Adatta formato OSRM al nostro formato
+      const geom = osrmRoute.geometry.coordinates;
+      const latLngs = geom.map(c=>L.latLng(c[1],c[0]));
+      state.routeCoords = geom.map(c=>({lat:c[1],lng:c[0]}));
+      if(state.routeLine) map.removeLayer(state.routeLine);
+      state.routeLine = L.polyline(latLngs,{color:lcolor(),weight:5,opacity:0.85,zIndex:400}).addTo(map);
+      const dist = (osrmRoute.distance/1000).toFixed(1);
+      const tot = Math.round(osrmRoute.duration/60);
+      document.getElementById('s-dist').textContent = dist;
+      document.getElementById('s-time').textContent = `${Math.floor(tot/60)}h ${tot%60}m`;
+      document.getElementById('seg-list').innerHTML = '';
+      state._orsLegs = [];
+      return;
+    }
+
+    // ORS riuscito — disegna geometria ORS
+    const geom = feat.geometry.coordinates;
+    const latLngs = geom.map(c=>L.latLng(c[1],c[0]));
+    state.routeCoords = geom.map(c=>({lat:c[1],lng:c[0]}));
+
+    if(state.routeLine) map.removeLayer(state.routeLine);
+    state.routeLine = L.polyline(latLngs,{color:lcolor(),weight:5,opacity:0.85,zIndex:400}).addTo(map);
+
+    const props = feat.properties;
+    const dist = props.summary.distance.toFixed(1);
+    const tot = Math.round(props.summary.duration/60);
+    document.getElementById('s-dist').textContent = dist;
+    document.getElementById('s-time').textContent = `${Math.floor(tot/60)}h ${tot%60}m`;
+
+    state._orsLegs = props.segments || [];
+    state._orsSteps = (props.segments||[]).flatMap(s=>s.steps||[]);
     renderSegments();
-    // Salva coords per export
-    state.routeCoords=r.coordinates.map(c=>({lat:c.lat,lng:c.lng}));
-  });
 
-  state.ctrl.on('routingerror',e=>{
-    console.error('routing error',e);
-    document.getElementById('s-dist').textContent='errore';
-    document.getElementById('s-time').textContent='—';
+  } catch(err) {
+    console.error('Routing error:', err);
+    document.getElementById('s-dist').textContent = 'errore';
+    document.getElementById('s-time').textContent = '—';
     toast('Errore routing — controlla connessione.');
-  });
+  }
 }
 
 // Sincronizza waypoint LRM → nostro state
