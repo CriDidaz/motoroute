@@ -186,8 +186,10 @@ body{font-family:system-ui,sans-serif;background:#f0ede6;color:#1a1a1a;height:10
 <script>
 // ── ORS Router per LRM ──────────────────────────────────────────────
 L.Routing.ORS = L.Class.extend({
-  initialize(filters){this._filters=filters;},
+  initialize(filters){this._filters=filters;this._cancelled=false;},
   route(waypoints,cb){
+    this._cancelled=false;
+    const safeCb=(err,routes)=>{if(!this._cancelled) cb(err,routes);};
     const coords=waypoints.map(w=>[
       parseFloat(w.latLng.lng.toFixed(6)),
       parseFloat(w.latLng.lat.toFixed(6))
@@ -211,7 +213,7 @@ L.Routing.ORS = L.Class.extend({
       method:'POST',
       headers:{
         'Content-Type':'application/json',
-        'Authorization':'5b3ce3597851110001cf62483da87cd949694c1a9a6f3c9b40a7e1f'
+        'Authorization':'eyJvcmciOiI1YjNjZTM1OTc4NTExMTAwMDFjZjYyNDgiLCJpZCI6ImRlYzJkMzdjOTMxNDQ2MGZiZjFkZGMwMDM3NTU5YjJkIiwiaCI6Im11cm11cjY0In0='
       },
       body:JSON.stringify(body)
     })
@@ -237,7 +239,7 @@ L.Routing.ORS = L.Class.extend({
       // Salva legs per stats
       state._orsLegs=props.segments||[];
       state._orsSteps=(props.segments||[]).flatMap(s=>s.steps||[]);
-      cb(null,routes);
+      safeCb(null,routes);
     })
     .catch(err=>{
       console.warn('ORS error:',err.message,'. Fallback OSRM...');
@@ -258,9 +260,9 @@ L.Routing.ORS = L.Class.extend({
             instructions:[],legs:[]
           }];
           state._orsLegs=[];state._orsSteps=[];
-          cb(null,routes);
+          safeCb(null,routes);
         })
-        .catch(e=>cb(e));
+        .catch(e=>safeCb(e));
     });
   }
 });
@@ -462,10 +464,15 @@ function rebuildRoute(){
     document.getElementById('seg-list').innerHTML='';
     return;
   }
-  if(state.ctrl){map.removeControl(state.ctrl);state.ctrl=null;}
+  if(state.ctrl){
+    // Cancella eventuali richieste pendenti prima di rimuovere
+    if(state.ctrl._router) state.ctrl._router._cancelled=true;
+    map.removeControl(state.ctrl);state.ctrl=null;
+  }
 
   const router=new L.Routing.ORS(state.filters);
 
+  state._router=router;
   state.ctrl=L.Routing.control({
     waypoints:wps.map(w=>L.Routing.waypoint(L.latLng(w.latlng))),
     router,
