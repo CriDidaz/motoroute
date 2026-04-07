@@ -187,7 +187,7 @@ body{font-family:system-ui,sans-serif;background:#f5f4f0;color:#1a1a1a;height:10
   <div class="ctx-item" id="ctx-hard"><span style="color:#185FA5;font-size:14px;">●</span> tappa obbligatoria</div>
   <div class="ctx-item" id="ctx-soft"><span style="color:#B4B2A9;font-size:14px;">●</span> punto guida (soft)</div>
 </div>
-<div id="hint-box">click sx → tappa · click dx → opzioni<br>trascina linea → punto guida · ⠿ riordina</div>
+<div id="hint-box">click dx → aggiunge tappa<br>trascina linea → punto guida<br>doppio click guida → elimina<br>⠿ trascina per riordinare</div>
 <div id="status-bar"></div>
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 
@@ -416,7 +416,9 @@ function parseImport(text,filename){
       else wps.push(wp);
     });
     refreshMarkers();renderSidebar();
-    if(wps.length>=2) rebuildRoute();
+    // Ricalcola percorso solo se i waypoint importati sono punti nominati
+    // Se c'è già una traccia geometrica importata, non sovrascriverla con routing automatico
+    if(wps.length>=2 && !coords.length) rebuildRoute();
   }
 
   // Disegna traccia importata se presente
@@ -427,8 +429,9 @@ function parseImport(text,filename){
     state.importedLayer=poly;
     document.getElementById('imported-section').style.display='block';
     document.getElementById('imported-pill').textContent=`${coords.length} pt`;
-    // Calcola stats dalla geometria importata
+    // Mostra distanza dalla traccia importata (geometria reale GPS)
     updateStatsFromCoords(coords);
+    // Nota: premi "calcola percorso" per il routing stradale tra le tappe
     const bounds=namedWpts.length?L.latLngBounds([...namedWpts.map(w=>w.latlng),...coords.map(c=>[c.lat,c.lng])]):poly.getBounds();
     map.fitBounds(bounds,{padding:[30,30]});
   } else if(namedWpts.length){
