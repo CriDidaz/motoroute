@@ -469,46 +469,44 @@ function clearImported(silent){
 }
 document.getElementById('imported-clear').onclick=()=>clearImported(false);
 function buildExclude(){const ex=[];if(state.filters.motorway) ex.push('motorway');if(state.filters.toll) ex.push('toll');if(state.filters.ferry) ex.push('ferry');return ex.join(',');}
+function buildORSRequest(validWps){
+  const coordinates=validWps.map(w=>[
+    parseFloat(w.latlng.lng.toFixed(6)),
+    parseFloat(w.latlng.lat.toFixed(6))
+  ]);
+  const body={
+    coordinates,
+    preference:'recommended',
+    geometry:true,instructions:false,elevation:false,units:'km'
+  };
+  const avoidFeatures=[];
+  if(state.filters.motorway) avoidFeatures.push('highways');
+  if(state.filters.toll) avoidFeatures.push('tollways');
+  if(state.filters.ferry) avoidFeatures.push('ferries');
+  if(avoidFeatures.length) body.options={avoid_features:avoidFeatures};
+  return {
+    url:'https://api.openrouteservice.org/v2/directions/driving-car/geojson',
+    method:'POST',
+    headers:{'Content-Type':'application/json','Authorization':'5b3ce3597851110001cf62483da87cd949694c1a9a6f3c9b40a7e1f'},
+    body:JSON.stringify(body)
+  };
+}
+
+function buildOSRMRequest(validWps){
+  const coords=validWps.map(w=>`${w.latlng.lng.toFixed(6)},${w.latlng.lat.toFixed(6)}`).join(';');
+  return {
+    url:`https://routing.openstreetmap.de/routed-car/route/v1/driving/${coords}?overview=full&geometries=geojson&steps=false`,
+    method:'GET'
+  };
+}
+
 function buildRouteRequest(wps){
   const validWps=wps.filter(w=>{
     const lat=w.latlng.lat,lng=w.latlng.lng;
     return !isNaN(lat)&&!isNaN(lng)&&lat>=-90&&lat<=90&&lng>=-180&&lng<=180;
   });
   if(validWps.length<2) return null;
-
-  // OpenRouteService — CORS aperto, no API key per uso base,
-  // rispetta ordine waypoint, supporta avoid highways e tollways
-  const coordinates=validWps.map(w=>[
-    parseFloat(w.latlng.lng.toFixed(6)),
-    parseFloat(w.latlng.lat.toFixed(6))
-  ]);
-
-  const body={
-    coordinates,
-    format:'geojson',
-    preference:'recommended', // bilancia velocità e qualità strada — evita autostrade inutili
-    geometry:true,
-    instructions:false,
-    elevation:false,
-    units:'km'
-  };
-
-  // Avoid features
-  const avoidFeatures=[];
-  if(state.filters.motorway) avoidFeatures.push('highways');
-  if(state.filters.toll) avoidFeatures.push('tollways');
-  if(state.filters.ferry) avoidFeatures.push('ferries');
-  if(avoidFeatures.length) body.options={avoid_features:avoidFeatures};
-
-  return {
-    url:'https://api.openrouteservice.org/v2/directions/driving-car/geojson',
-    method:'POST',
-    headers:{
-      'Content-Type':'application/json',
-      'Authorization':'5b3ce3597851110001cf62483da87cd949694c1a9a6f3c9b40a7e1f'
-    },
-    body:JSON.stringify(body)
-  };
+  return {ors:buildORSRequest(validWps),osrm:buildOSRMRequest(validWps),validWps};
 }
 
 function haversineM(a,b){
@@ -557,6 +555,16 @@ function updateSegmentsValhalla(legs,wps){
   document.getElementById('segment-list').innerHTML=segs;
 }
 function updateSegmentsGH(path,wps){}
+function applyRoute(latLngs,routeCoords,distKm,totalMin,segments,wps,engine){
+  state.routeCoords=routeCoords;
+  if(state.routeLine) map.removeLayer(state.routeLine);
+  state.routeLine=L.polyline(latLngs,{color:lcolor(),weight:6,opacity:0.85}).addTo(map);
+  enableLineDrag(latLngs);
+  const h=Math.floor(totalMin/60),m=totalMin%60;
+  document.getElementById('s-dist').textContent=distKm;
+  document.getElementById('s-time').textContent=`${h}h ${m}m`;
+  if(engine==='ors'&&segments) updateSegmentsORS(segments,wps);
+}
 function updateSegmentsORS(segments,wps){
   if(!segments||!segments.length) return;
   const hl=hardList();
@@ -600,38 +608,44 @@ function rebuildRoute(){
   document.getElementById('s-time').textContent='…';
   const req=buildRouteRequest(wps);
   if(!req){showStatus('Coordinate non valide o meno di 2 tappe.');return;}
-  const fetchOpts={method:req.method||'GET'};
-  if(req.headers) fetchOpts.headers=req.headers;
-  if(req.body) fetchOpts.body=req.body;
-  fetch(req.url,fetchOpts)
+  // Prova ORS (supporta avoid, funziona da HTTPS)
+  // Fallback su OSRM (funziona da localhost, no avoid)
+  const orsReq=req.ors;
+  function tryOSRM(){
+    const osrmReq=req.osrm;
+    fetch(osrmReq.url,{method:'GET'})
+      .then(r=>{if(!r.ok) throw new Error(r.status);return r.json();})
+      .then(data=>{
+        if(data.code!=='Ok'||!data.routes||!data.routes.length) throw new Error('no route');
+        const route=data.routes[0];
+        const geom=route.geometry.coordinates;
+        applyRoute(geom.map(c=>L.latLng(c[1],c[0])),geom.map(c=>({lat:c[1],lng:c[0]})),
+          (route.distance/1000).toFixed(1),Math.round(route.duration/60),
+          null,wps,'osrm');
+        if(state.filters.motorway||state.filters.toll)
+          showStatus('Filtri attivi — funzionano solo su https://crididaz.github.io/motoroute');
+      })
+      .catch(err=>{
+        console.error('OSRM error',err);
+        document.getElementById('s-dist').textContent='errore';
+        document.getElementById('s-time').textContent='—';
+        showStatus('Errore routing — controlla connessione.');
+      });
+  }
+  fetch(orsReq.url,{method:'POST',headers:orsReq.headers,body:orsReq.body})
     .then(r=>{if(!r.ok) throw new Error(r.status);return r.json();})
     .then(data=>{
-      // ORS GeoJSON format
       if(!data.features||!data.features.length) throw new Error('no route');
       const feat=data.features[0];
-      const geom=feat.geometry.coordinates; // [lng,lat]
-      const latLngs=geom.map(c=>L.latLng(c[1],c[0]));
-      state.routeCoords=geom.map(c=>({lat:c[1],lng:c[0]}));
-
-      if(state.routeLine) map.removeLayer(state.routeLine);
-      state.routeLine=L.polyline(latLngs,{color:lcolor(),weight:6,opacity:0.85}).addTo(map);
-      enableLineDrag(latLngs);
-
+      const geom=feat.geometry.coordinates;
       const props=feat.properties.summary;
-      const distKm=(props.distance).toFixed(1);
-      const totalMin=Math.round(props.duration/60);
-      const h=Math.floor(totalMin/60),m=totalMin%60;
-      document.getElementById('s-dist').textContent=distKm;
-      document.getElementById('s-time').textContent=`${h}h ${m}m`;
-
-      // Segmenti per tratto — ORS restituisce segments
-      updateSegmentsORS(feat.properties.segments,wps);
+      applyRoute(geom.map(c=>L.latLng(c[1],c[0])),geom.map(c=>({lat:c[1],lng:c[0]})),
+        props.distance.toFixed(1),Math.round(props.duration/60),
+        feat.properties.segments,wps,'ors');
     })
     .catch(err=>{
-      console.error('routing error',err);
-      document.getElementById('s-dist').textContent='errore';
-      document.getElementById('s-time').textContent='—';
-      showStatus('Errore routing — controlla connessione internet.');
+      console.warn('ORS non disponibile, fallback OSRM:',err.message);
+      tryOSRM();
     });
 }
 
