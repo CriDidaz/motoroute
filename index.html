@@ -104,7 +104,7 @@ body{font-family:system-ui,sans-serif;background:#f0ede6;color:#1a1a1a;height:10
 </head>
 <body>
 <div id="topbar">
-  <h1>MotoRoute <span>planner</span></h1><span style="font-size:10px;color:#bbb;background:#f0ede6;padding:2px 7px;border-radius:10px;">v0.9</span>
+  <h1>MotoRoute <span>planner</span></h1><span style="font-size:10px;color:#bbb;background:#f0ede6;padding:2px 7px;border-radius:10px;">v0.10</span>
   <div class="sep"></div>
   <span style="font-size:10px;color:#bbb;">evita:</span>
   <button class="fbtn" id="f-mw">autostrade</button>
@@ -1039,7 +1039,7 @@ function applyMapMatching(coords, all){
   const h = all.filter(w=>w.type!=='soft');
   if(h.length<2) return;
 
-  // Rimuovi tutti i soft esistenti prima di reinserire
+  // Rimuovi tutti i soft esistenti
   for(let i=all.length-1;i>=0;i--){
     if(all[i].type==='soft'){
       if(all[i].marker) map.removeLayer(all[i].marker);
@@ -1048,11 +1048,10 @@ function applyMapMatching(coords, all){
   }
 
   // Per ogni coppia hard[i]→hard[i+1]
-  // campiona MAX 6 punti equidistanti dalla traccia GPS come soft
-  // Pochi punti = ORS segue la direzione naturale senza loop
+  // campiona max 6 punti equidistanti dalla traccia come soft
   h.forEach((hw,hi)=>{
     if(hi===h.length-1) return;
-    const hwNext = h[hi+1];
+    const hwNext=h[hi+1];
 
     // Trova indici nella traccia più vicini ai due hard
     let iA=0,iB=coords.length-1,dA=Infinity,dB=Infinity;
@@ -1081,14 +1080,15 @@ function applyMapMatching(coords, all){
     }
 
     // Inserisci i soft prima di hwNext
-    const insertPos=all.indexOf(hwNext);
-    interior.forEach((c,ci)=>{
+    // IMPORTANTE: ricalcola insertPos ogni volta perché all cambia lunghezza
+    interior.forEach(c=>{
+      const insertPos=all.indexOf(hwNext); // ricalcolato ad ogni iterazione
       const ll=L.latLng(c.lat,c.lng);
       const marker=L.marker(ll,{icon:mkIcon('soft',''),draggable:true,zIndexOffset:-200}).addTo(map);
       const wp={latlng:ll,type:'soft',name:`via ${c.lat.toFixed(3)},${c.lng.toFixed(3)}`,marker,_id:mkId()};
       marker.on('dragend',()=>{wp.latlng=marker.getLatLng();calcRoute();});
       marker.on('dblclick',()=>removeSoft(wp._id));
-      all.splice(insertPos+ci,0,wp);
+      all.splice(insertPos,0,wp); // inserisce PRIMA di hwNext
     });
   });
 
