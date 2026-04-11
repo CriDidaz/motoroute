@@ -471,24 +471,40 @@ async function _doCalcRoute() {
 async function calcTratto(tratto, avoidFeatures) {
   const pts = [tratto.from, ...tratto.softs, tratto.to];
 
-  // Rimuovi punti duplicati o troppo vicini (< 30m) che causano 404
+  // Rimuovi punti duplicati o troppo vicini (< 50m) che causano 404
   const filtered = [pts[0]];
   for (let i=1; i<pts.length; i++) {
     const prev = filtered[filtered.length-1];
     const d = haversine(prev.latlng.lat,prev.latlng.lng,pts[i].latlng.lat,pts[i].latlng.lng);
-    if (d > 30) filtered.push(pts[i]);
+    if (d > 50) filtered.push(pts[i]);
   }
-  // Se dopo il filtro restano meno di 2 punti, skip
+  // Assicura che l'ultimo punto ci sia sempre
+  const lastPt = pts[pts.length-1];
+  const lastFiltered = filtered[filtered.length-1];
+  if (lastFiltered._id !== lastPt._id) filtered.push(lastPt);
+
+  // Se dopo il filtro restano meno di 2 punti distinti, usa linea diretta
   if (filtered.length < 2) {
     const from = pts[0], to = pts[pts.length-1];
     const d = haversine(from.latlng.lat,from.latlng.lng,to.latlng.lat,to.latlng.lng)/1000;
     return { coords:[{lat:from.latlng.lat,lng:from.latlng.lng},{lat:to.latlng.lat,lng:to.latlng.lng}], dist:d, dur:d/50*3600, legs:[] };
   }
 
-  const coords = filtered.map(w=>[
+  // Dedup coordinate identiche dopo arrotondamento
+  const coordsRaw = filtered.map(w=>[
     parseFloat(w.latlng.lng.toFixed(6)),
     parseFloat(w.latlng.lat.toFixed(6))
   ]);
+  const coords = [coordsRaw[0]];
+  for (let i=1;i<coordsRaw.length;i++){
+    if(coordsRaw[i][0]!==coords[coords.length-1][0]||coordsRaw[i][1]!==coords[coords.length-1][1])
+      coords.push(coordsRaw[i]);
+  }
+  if (coords.length < 2) {
+    const from=pts[0],to=pts[pts.length-1];
+    const d=haversine(from.latlng.lat,from.latlng.lng,to.latlng.lat,to.latlng.lng)/1000;
+    return {coords:[{lat:from.latlng.lat,lng:from.latlng.lng},{lat:to.latlng.lat,lng:to.latlng.lng}],dist:d,dur:d/50*3600,legs:[]};
+  }
 
   const body = {
     coordinates: coords,
@@ -870,7 +886,7 @@ function parseImport(text,filename){
     refreshIcons(); renderSB();
   }
 
-  // Traccia geometrica → linea arancione tratteggiata (non routing)
+  // Traccia geometrica → linea arancione + map matching
   if(coords.length){
     S.importedCoords=coords;
     const poly=L.polyline(coords.map(c=>[c.lat,c.lng]),{
@@ -880,7 +896,7 @@ function parseImport(text,filename){
       L.DomEvent.stopPropagation(e);
       ctxLL=e.latlng;
       const m=document.getElementById('ctx');
-      m.style.display='block'; m.style.left=e.originalEvent.clientX+'px'; m.style.top=e.originalEvent.clientY+'px';
+      m.style.display='block';m.style.left=e.originalEvent.clientX+'px';m.style.top=e.originalEvent.clientY+'px';
     });
     S.importedLayer=poly;
     document.getElementById('is').style.display='block';
@@ -891,17 +907,22 @@ function parseImport(text,filename){
     for(let i=1;i<coords.length;i++) dist+=haversine(coords[i-1].lat,coords[i-1].lng,coords[i].lat,coords[i].lng);
     document.getElementById('sv-d').textContent=(dist/1000).toFixed(1);
     document.getElementById('sv-t').textContent='—';
-    document.getElementById('segl').innerHTML='<div class="sgr2"><span class="sgl" style="color:#BA7517;">GPS</span><span>distanza traccia</span><span style="color:#bbb;">premi calcola</span></div>';
+
+    // MAP MATCHING: estrai waypoint chiave dalla traccia con DP aggressivo
+    // e inseriscili come soft waypoint — ORS li segue e abbraccia la traccia
+    if(all.length>=2){
+      applyMapMatching(coords, all);
+    }
 
     map.fitBounds(poly.getBounds(),{padding:[30,30]});
   }
 
-  // Calcola routing solo se ci sono waypoint nominati e no traccia geometrica
-  if(all.length>=2&&!coords.length) calcRoute();
+  // Calcola routing
+  if(all.length>=2) calcRoute();
 
   const msgs=[];
   if(named.length) msgs.push(`${named.length} tappe`);
-  if(coords.length) msgs.push(`traccia ${coords.length} pt`);
+  if(coords.length) msgs.push(`traccia ${coords.length} pt — waypoint chiave estratti`);
   toast(msgs.join(' + ')+' importati');
 }
 
@@ -912,6 +933,80 @@ function clearImported(silent){
   if(!silent) toast('Traccia rimossa.');
 }
 document.getElementById('ic').onclick=()=>clearImported(false);
+
+// MAP MATCHING — estrae waypoint chiave da una traccia geometrica
+// e li inserisce come soft waypoint tra partenza e arrivo
+// Usa Douglas-Peucker con tolleranza adattiva per ottenere ~20-40 punti chiave
+function applyMapMatching(coords, all){
+  const h = all.filter(w=>w.type!=='soft');
+  if(h.length<2) return;
+
+  // Filtra la traccia solo tra partenza e arrivo (per evitare punti fuori percorso)
+  const start = h[0].latlng, end = h[h.length-1].latlng;
+
+  // Trova indice più vicino a partenza e arrivo nella traccia
+  let iStart=0, iEnd=coords.length-1, dS=Infinity, dE=Infinity;
+  coords.forEach((c,i)=>{
+    const ds=haversine(start.lat,start.lng,c.lat,c.lng);
+    const de=haversine(end.lat,end.lng,c.lat,c.lng);
+    if(ds<dS){dS=ds;iStart=i;}
+    if(de<dE){dE=de;iEnd=i;}
+  });
+  if(iStart>iEnd){const t=iStart;iStart=iEnd;iEnd=t;}
+  const slice = coords.slice(iStart, iEnd+1);
+  if(slice.length<3) return;
+
+  // Douglas-Peucker adattivo — mira a ~30 punti chiave
+  // Aumenta la tolleranza finché non otteniamo un numero ragionevole
+  let simplified = slice;
+  for(const tol of [0.0005, 0.001, 0.002, 0.005, 0.01]){
+    simplified = dpSimplify(slice, tol);
+    if(simplified.length<=35) break;
+  }
+
+  // Rimuovi primo e ultimo (sono partenza/arrivo già presenti come hard)
+  const interior = simplified.slice(1,-1);
+  if(!interior.length) return;
+
+  // Inserisci come soft waypoint tra il primo e l'ultimo hard
+  // (se ci sono hard intermedi, inserisci proporzionalmente)
+  const firstHardIdx = all.indexOf(h[0]);
+  const lastHardIdx  = all.indexOf(h[h.length-1]);
+
+  // Rimuovi eventuali soft già presenti tra primo e ultimo hard
+  // (pulizia prima di reinserire)
+  let i=firstHardIdx+1;
+  while(i<all.length && all[i]!==h[h.length-1]){
+    if(all[i].type==='soft'){
+      if(all[i].marker) map.removeLayer(all[i].marker);
+      all.splice(i,1);
+    } else i++;
+  }
+
+  // Inserisci i nuovi soft
+  let insertAt = all.indexOf(h[h.length-1]); // prima dell'ultimo hard
+  interior.forEach(c=>{
+    const ll = L.latLng(c.lat, c.lng);
+    const marker = L.marker(ll,{
+      icon:mkIcon('soft',''), draggable:true, zIndexOffset:-200
+    }).addTo(map);
+    const wp = {latlng:ll, type:'soft', name:`${c.lat.toFixed(4)},${c.lng.toFixed(4)}`, marker, _id:mkId()};
+    marker.on('dragend',()=>{ wp.latlng=marker.getLatLng(); revGeo(wp.latlng,wp); calcRoute(); });
+    marker.on('dblclick',()=>removeSoft(wp._id));
+    all.splice(insertAt, 0, wp);
+    insertAt++;
+    // Reverse geocode asincrono (non blocca)
+    revGeo(ll, wp);
+  });
+
+  if(!S.softOpen){
+    S.softOpen=true;
+    document.getElementById('sl').classList.add('o');
+    document.getElementById('sa').classList.add('o');
+  }
+  refreshIcons(); renderSB();
+  toast(`${interior.length} punti guida estratti dalla traccia`);
+}
 
 // ═══════════════════════════════════════════════════════════════
 // EXPORT GPX (con elevazione ORS)
