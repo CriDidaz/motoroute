@@ -389,24 +389,88 @@ function addWp(latlng, type, pos) {
 }
 
 // ═══════════════════════════════════════════════════════════════
-// ORS ROUTING
+// ORS ROUTING — per tratto indipendente
+// Ogni coppia hard→hard viene calcolata separatamente con i suoi soft.
+// Modificare un tratto non influenza gli altri.
 // ═══════════════════════════════════════════════════════════════
 let _routeTimer = null;
 function calcRoute() {
   clearTimeout(_routeTimer);
-  _routeTimer = setTimeout(_doCalcRoute, 300); // debounce 300ms
+  _routeTimer = setTimeout(_doCalcRoute, 400);
 }
 
 async function _doCalcRoute() {
-  const all=wps();
-  if (all.length<2) {
-    clearRoute(); return;
-  }
-  if (S.routing) return; // evita chiamate sovrapposte
+  const all = wps();
+  const h = hard();
+  if (h.length < 2) { clearRoute(); return; }
+  if (S.routing) return;
   S.routing = true;
   showSpinner(true);
 
-  const coords = all.map(w=>[
+  // Costruisce i tratti: per ogni coppia hard[i]→hard[i+1]
+  // raccoglie i soft intermedi
+  const tratti = [];
+  for (let i=0; i<h.length-1; i++) {
+    const iA = all.indexOf(h[i]);
+    const iB = all.indexOf(h[i+1]);
+    const softs = all.slice(iA+1, iB).filter(w=>w.type==='soft');
+    tratti.push({
+      from: h[i],
+      to:   h[i+1],
+      softs
+    });
+  }
+
+  const av=[];
+  if (S.filters.motorway) av.push('highways');
+  if (S.filters.toll)     av.push('tollways');
+  if (S.filters.ferry)    av.push('ferries');
+
+  // Calcola ogni tratto in parallelo
+  const results = await Promise.all(tratti.map(t => calcTratto(t, av)));
+
+  // Verifica che tutti siano ok
+  const allOk = results.every(r=>r!==null);
+  if (!allOk) {
+    toast('Errore routing su uno o più tratti');
+    S.routing = false;
+    showSpinner(false);
+    return;
+  }
+
+  // Concatena geometrie (evita duplicare il punto di giunzione)
+  let allCoords = [];
+  let totalDist = 0, totalDur = 0;
+  const legs = [];
+
+  results.forEach((r, i) => {
+    const coords = i===0 ? r.coords : r.coords.slice(1);
+    allCoords = allCoords.concat(coords);
+    totalDist += r.dist;
+    totalDur  += r.dur;
+    if (r.legs) legs.push(...r.legs);
+  });
+
+  S.routeCoords = allCoords;
+  S.orsLegs = legs;
+
+  const latLngs = allCoords.map(c=>L.latLng(c.lat, c.lng));
+  drawRouteLine(latLngs);
+
+  const distKm = totalDist.toFixed(1);
+  const tot = Math.round(totalDur/60);
+  document.getElementById('sv-d').textContent = distKm;
+  document.getElementById('sv-t').textContent = `${Math.floor(tot/60)}h ${tot%60}m`;
+
+  renderSegments();
+  S.routing = false;
+  showSpinner(false);
+}
+
+// Calcola un singolo tratto hard→hard con i suoi soft intermedi
+async function calcTratto(tratto, avoidFeatures) {
+  const pts = [tratto.from, ...tratto.softs, tratto.to];
+  const coords = pts.map(w=>[
     parseFloat(w.latlng.lng.toFixed(6)),
     parseFloat(w.latlng.lat.toFixed(6))
   ]);
@@ -420,71 +484,46 @@ async function _doCalcRoute() {
     units: 'km',
     language: 'it'
   };
-
-  const av=[];
-  if (S.filters.motorway) av.push('highways');
-  if (S.filters.toll)     av.push('tollways');
-  if (S.filters.ferry)    av.push('ferries');
-  if (av.length) body.options = {avoid_features: av};
+  if (avoidFeatures.length) body.options = {avoid_features: avoidFeatures};
 
   try {
     const r = await fetch(ORS_URL, {
-      method:'POST',
-      headers:{'Content-Type':'application/json','Authorization':ORS_KEY},
+      method: 'POST',
+      headers: {'Content-Type':'application/json','Authorization':ORS_KEY},
       body: JSON.stringify(body)
     });
     if (!r.ok) throw new Error('ORS '+r.status);
     const data = await r.json();
     if (!data.features||!data.features.length) throw new Error('no route');
-    applyRoute(data.features[0]);
+    const feat = data.features[0];
+    const geom = feat.geometry.coordinates;
+    return {
+      coords: geom.map(c=>({lat:c[1], lng:c[0]})),
+      dist:   feat.properties.summary.distance,
+      dur:    feat.properties.summary.duration,
+      legs:   feat.properties.segments||[]
+    };
   } catch(err) {
-    console.warn('ORS error:', err.message, '— trying OSRM fallback');
+    console.warn('ORS tratto error:', err.message, '— OSRM fallback');
+    // Fallback OSRM per questo tratto
     try {
-      const c = all.map(w=>`${w.latlng.lng.toFixed(6)},${w.latlng.lat.toFixed(6)}`).join(';');
+      const c = pts.map(w=>`${w.latlng.lng.toFixed(6)},${w.latlng.lat.toFixed(6)}`).join(';');
       const r = await fetch(`https://routing.openstreetmap.de/routed-car/route/v1/driving/${c}?overview=full&geometries=geojson&steps=false`);
       const data = await r.json();
       if (data.code!=='Ok'||!data.routes||!data.routes.length) throw new Error('osrm fail');
-      applyOSRM(data.routes[0]);
-      if (S.filters.motorway||S.filters.toll) toast('Filtri attivi solo su GitHub Pages con ORS');
+      const route = data.routes[0];
+      const geom = route.geometry.coordinates;
+      return {
+        coords: geom.map(c=>({lat:c[1], lng:c[0]})),
+        dist:   route.distance/1000,
+        dur:    route.duration,
+        legs:   []
+      };
     } catch(e2) {
-      toast('Errore routing — controlla connessione');
-      document.getElementById('sv-d').textContent='errore';
-      document.getElementById('sv-t').textContent='—';
+      console.error('Fallback failed:', e2);
+      return null;
     }
-  } finally {
-    S.routing = false;
-    showSpinner(false);
   }
-}
-
-function applyRoute(feat) {
-  const geom = feat.geometry.coordinates; // [lng,lat]
-  const latLngs = geom.map(c=>L.latLng(c[1],c[0]));
-  S.routeCoords = geom.map(c=>({lat:c[1],lng:c[0]}));
-  drawRouteLine(latLngs);
-
-  const props = feat.properties;
-  const dist = props.summary.distance.toFixed(1);
-  const tot  = Math.round(props.summary.duration/60);
-  document.getElementById('sv-d').textContent = dist;
-  document.getElementById('sv-t').textContent = `${Math.floor(tot/60)}h ${tot%60}m`;
-
-  S.orsLegs = props.segments||[];
-  renderSegments();
-}
-
-function applyOSRM(route) {
-  const geom = route.geometry.coordinates;
-  const latLngs = geom.map(c=>L.latLng(c[1],c[0]));
-  S.routeCoords = geom.map(c=>({lat:c[1],lng:c[0]}));
-  drawRouteLine(latLngs);
-
-  const dist = (route.distance/1000).toFixed(1);
-  const tot  = Math.round(route.duration/60);
-  document.getElementById('sv-d').textContent = dist;
-  document.getElementById('sv-t').textContent = `${Math.floor(tot/60)}h ${tot%60}m`;
-  S.orsLegs = [];
-  document.getElementById('segl').innerHTML='';
 }
 
 function clearRoute() {
