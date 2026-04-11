@@ -104,7 +104,7 @@ body{font-family:system-ui,sans-serif;background:#f0ede6;color:#1a1a1a;height:10
 </head>
 <body>
 <div id="topbar">
-  <h1>MotoRoute <span>planner</span></h1><span style="font-size:10px;color:#bbb;background:#f0ede6;padding:2px 7px;border-radius:10px;">v0.15</span>
+  <h1>MotoRoute <span>planner</span></h1><span style="font-size:10px;color:#bbb;background:#f0ede6;padding:2px 7px;border-radius:10px;">v0.16</span>
   <div class="sep"></div>
   <span style="font-size:10px;color:#bbb;">evita:</span>
   <button class="fbtn" id="f-mw">autostrade</button>
@@ -139,7 +139,13 @@ body{font-family:system-ui,sans-serif;background:#f0ede6;color:#1a1a1a;height:10
       </div>
       <div style="height:5px;flex-shrink:0;"></div>
       <div id="is" style="display:none;">
-        <div id="ih"><span class="il">traccia importata <span class="ip" id="ipp">0 pt</span></span><button id="ic">rimuovi</button></div>
+        <div id="ih">
+  <span class="il">traccia importata <span class="ip" id="ipp">0 pt</span></span>
+  <div style="display:flex;gap:4px;">
+    <button id="i-use" style="font-size:10px;padding:1px 7px;border-radius:6px;border:1px solid #185FA5;background:#E6F1FB;color:#185FA5;cursor:pointer;font-family:inherit;">usa come guida</button>
+    <button id="ic">rimuovi</button>
+  </div>
+</div>
       </div>
       <div style="height:5px;flex-shrink:0;"></div>
       <div id="ss">
@@ -658,20 +664,7 @@ async function calcTratto(tratto, avoidFeatures) {
     language: 'it'
   };
 
-  // Bearings per ogni waypoint — ORS rispetta la direzione lungo la rotta
-  // Formato ufficiale ORS: [[angolo, deviazione], ...] con un elemento per waypoint
-  // [0, 360] = qualsiasi direzione (nessun vincolo)
-  // Solo se la rotta è già calcolata — altrimenti ORS sceglie liberamente
-  if(filtered.length>=2 && S.routeCoords.length>0){
-    const bearings = filtered.map(w=>{
-      const b = polylineBearingAt(w.latlng, S.routeCoords);
-      return b!==null ? [Math.round(b), 60] : [0, 360];
-    });
-    // Usa bearings solo se almeno un punto ha un vincolo reale
-    if(bearings.some(b=>b[1]!==360)){
-      body.bearings = bearings;
-    }
-  }
+  // bearings rimosso — causa 400 con configurazione ORS pubblica
 
   // Avoid: filtri manuali + traccia
   const traceAvoid = S.traceParams ? S.traceParams.avoidFeatures : [];
@@ -1234,6 +1227,14 @@ function clearImported(silent){
   if(!silent) toast('Traccia rimossa.');
 }
 document.getElementById('ic').onclick=()=>clearImported(false);
+document.getElementById('i-use').onclick=()=>{
+  const all=wps();
+  const h=hard();
+  if(h.length<2){toast('Aggiungi prima partenza e arrivo.');return;}
+  if(!S.importedCoords.length){toast('Nessuna traccia importata.');return;}
+  applyMapMatching(S.importedCoords,all);
+  calcRoute();
+};
 
 // MAP MATCHING — estrae waypoint chiave da una traccia geometrica
 // e li inserisce come soft waypoint tra partenza e arrivo
@@ -1242,7 +1243,8 @@ function applyMapMatching(coords, all){
   const h = all.filter(w=>w.type!=='soft');
   if(h.length<2) return;
 
-  // Rimuovi tutti i soft esistenti
+  // Rimuovi waypoint intermedi precedenti (non partenza/arrivo)
+  // solo quelli aggiunti dal map matching (hanno nome "via ...")
   for(let i=all.length-1;i>=0;i--){
     if(all[i].type==='soft'){
       if(all[i].marker) map.removeLayer(all[i].marker);
@@ -1250,13 +1252,12 @@ function applyMapMatching(coords, all){
     }
   }
 
-  // Per ogni coppia hard[i]→hard[i+1]
-  // campiona max 6 punti equidistanti dalla traccia come soft
+  // Per ogni tratto hard→hard estrai MAX 5 punti equidistanti come HARD waypoint
+  // Visibili all'utente, eliminabili, inseriti nell'ordine corretto
   h.forEach((hw,hi)=>{
     if(hi===h.length-1) return;
     const hwNext=h[hi+1];
 
-    // Trova indici nella traccia più vicini ai due hard
     let iA=0,iB=coords.length-1,dA=Infinity,dB=Infinity;
     coords.forEach((c,ci)=>{
       const da=haversine(hw.latlng.lat,hw.latlng.lng,c.lat,c.lng);
@@ -1269,40 +1270,29 @@ function applyMapMatching(coords, all){
     const slice=coords.slice(iA,iB+1);
     if(slice.length<3) return;
 
-    // Max 6 punti interni equidistanti
-    const MAX_PTS=6;
+    // Max 5 punti interni equidistanti — pochi ma significativi
+    const MAX_PTS=5;
     const interior=[];
-    if(slice.length<=MAX_PTS+2){
-      for(let i=1;i<slice.length-1;i++) interior.push(slice[i]);
-    } else {
-      const step=(slice.length-2)/(MAX_PTS+1);
-      for(let i=1;i<=MAX_PTS;i++){
-        const ci=Math.round(i*step);
-        interior.push(slice[Math.min(ci,slice.length-2)]);
-      }
+    const step=(slice.length-2)/(MAX_PTS+1);
+    for(let i=1;i<=MAX_PTS;i++){
+      const ci=Math.round(i*step);
+      if(ci>0&&ci<slice.length-1) interior.push(slice[ci]);
     }
 
-    // Inserisci i soft prima di hwNext
-    // IMPORTANTE: ricalcola insertPos ogni volta perché all cambia lunghezza
-    interior.forEach(c=>{
-      const insertPos=all.indexOf(hwNext); // ricalcolato ad ogni iterazione
+    // Inserisci come waypoint hard visibili
+    const insertPos=all.indexOf(hwNext);
+    interior.forEach((c,ci)=>{
       const ll=L.latLng(c.lat,c.lng);
-      const marker=L.marker(ll,{icon:mkIcon('soft',''),draggable:true,zIndexOffset:-200}).addTo(map);
-      const wp={latlng:ll,type:'soft',name:`via ${c.lat.toFixed(3)},${c.lng.toFixed(3)}`,marker,_id:mkId()};
-      marker.on('dragend',()=>{wp.latlng=marker.getLatLng();calcRoute();});
-      marker.on('dblclick',()=>removeSoft(wp._id));
-      all.splice(insertPos,0,wp); // inserisce PRIMA di hwNext
+      const marker=L.marker(ll,{icon:mkIcon('hard','?'),draggable:true,zIndexOffset:0}).addTo(map);
+      const wp={latlng:ll,type:'hard',name:`tappa ${hi+1}.${ci+1}`,marker,_id:mkId()};
+      marker.on('dragend',()=>{wp.latlng=marker.getLatLng();revGeo(wp.latlng,wp);calcRoute();});
+      all.splice(insertPos+ci,0,wp);
     });
   });
 
-  if(!S.softOpen){
-    S.softOpen=true;
-    document.getElementById('sl').classList.add('o');
-    document.getElementById('sa').classList.add('o');
-  }
   refreshIcons();renderSB();
-  const tot=all.filter(w=>w.type==='soft').length;
-  toast(`${tot} punti guida dalla traccia — premi calcola percorso`);
+  const added=all.filter(w=>w.type==='hard').length-2;
+  toast(`${added} tappe intermedie aggiunte dalla traccia — puoi eliminarle`);
 }
 
 function dpSimplify(pts,tol){
