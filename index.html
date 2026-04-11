@@ -104,7 +104,7 @@ body{font-family:system-ui,sans-serif;background:#f0ede6;color:#1a1a1a;height:10
 </head>
 <body>
 <div id="topbar">
-  <h1>MotoRoute <span>planner</span></h1>
+  <h1>MotoRoute <span>planner</span></h1><span style="font-size:10px;color:#bbb;background:#f0ede6;padding:2px 7px;border-radius:10px;">v0.7</span>
   <div class="sep"></div>
   <span style="font-size:10px;color:#bbb;">evita:</span>
   <button class="fbtn" id="f-mw">autostrade</button>
@@ -359,10 +359,17 @@ document.getElementById('st').addEventListener('click', () => {
 // ═══════════════════════════════════════════════════════════════
 // GEOCODING (reverse)
 // ═══════════════════════════════════════════════════════════════
-// Rate-limited reverse geocoding — max 1 req/secondo verso Nominatim
+// Reverse geocoding con rate limit e fallback coordinate
+// Nominatim blocca CORS da alcuni domini — usiamo ORS geocode come alternativa
 const _geoQueue = [];
 let _geoRunning = false;
 function revGeo(latlng, wp) {
+  // Per i soft (punti tecnici) usa solo coordinate — evita chiamate inutili
+  if (wp.type==='soft') {
+    wp.name = `via ${latlng.lat.toFixed(3)},${latlng.lng.toFixed(3)}`;
+    renderSB();
+    return;
+  }
   _geoQueue.push({latlng, wp});
   if (!_geoRunning) _processGeoQueue();
 }
@@ -370,14 +377,21 @@ function _processGeoQueue() {
   if (!_geoQueue.length) { _geoRunning=false; return; }
   _geoRunning = true;
   const {latlng, wp} = _geoQueue.shift();
-  fetch(`https://nominatim.openstreetmap.org/reverse?lat=${latlng.lat}&lon=${latlng.lng}&format=json`)
+  // Usa ORS geocode reverse — CORS aperto, stessa key
+  fetch(`https://api.openrouteservice.org/geocode/reverse?api_key=${ORS_KEY}&point.lon=${latlng.lng.toFixed(6)}&point.lat=${latlng.lat.toFixed(6)}&size=1`)
     .then(r=>r.json()).then(d=>{
-      const a=d.address||{};
-      wp.name = [a.road,a.house_number,a.village||a.town||a.city].filter(Boolean).join(' ')
-                || `${latlng.lat.toFixed(3)},${latlng.lng.toFixed(3)}`;
+      const f = d.features?.[0];
+      if (f) {
+        const p = f.properties;
+        wp.name = [p.name,p.street,p.housenumber,p.locality||p.county].filter(Boolean).join(' ')
+                  || `${latlng.lat.toFixed(3)},${latlng.lng.toFixed(3)}`;
+      } else {
+        wp.name = `${latlng.lat.toFixed(3)},${latlng.lng.toFixed(3)}`;
+      }
       renderSB();
-    }).catch(()=>{})
-    .finally(()=>setTimeout(_processGeoQueue, 1100)); // 1.1s tra richieste
+    })
+    .catch(()=>{ wp.name=`${latlng.lat.toFixed(3)},${latlng.lng.toFixed(3)}`; renderSB(); })
+    .finally(()=>setTimeout(_processGeoQueue, 300));
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -630,17 +644,42 @@ function enableLineDrag(polyline) {
 
       const ll = ev.latlng;
       const all = wps();
-      // Trova il segmento della polyline più vicino al punto rilasciato
+
+      // Trova il segmento della polyline più vicino
       const insertIdx = findSegmentInsert(ll, S.routeCoords, all);
 
-      const marker = L.marker(ll, {
-        icon:mkIcon('soft',''), draggable:true, zIndexOffset:-200
-      }).addTo(map);
-      const wp = {latlng:ll, type:'soft', name:`${ll.lat.toFixed(4)},${ll.lng.toFixed(4)}`, marker, _id:mkId()};
-      marker.on('dragend', ()=>{ wp.latlng=marker.getLatLng(); revGeo(wp.latlng,wp); calcRoute(); });
-      marker.on('dblclick', ()=>removeSoft(wp._id));
-      all.splice(insertIdx, 0, wp);
-      revGeo(ll, wp);
+      // Trova i punti della polyline adiacenti al punto di inserimento
+      // e aggiungili come anchor soft per mantenere ORS sulla strada corretta
+      const anchors = findPolylineAnchors(ll, S.routeCoords, insertIdx, all);
+
+      // Inserisci prima gli anchor (in ordine), poi il punto principale
+      let at = insertIdx;
+      const newWps = [];
+
+      // Anchor prima del punto
+      if (anchors.before) {
+        const aMk = L.marker(anchors.before, {icon:mkIcon('soft',''),draggable:true,zIndexOffset:-200}).addTo(map);
+        const aWp = {latlng:anchors.before,type:'soft',name:`via ${anchors.before.lat.toFixed(3)},${anchors.before.lng.toFixed(3)}`,marker:aMk,_id:mkId()};
+        aMk.on('dragend',()=>{aWp.latlng=aMk.getLatLng();calcRoute();});
+        aMk.on('dblclick',()=>removeSoft(aWp._id));
+        all.splice(at,0,aWp); at++; newWps.push(aWp);
+      }
+
+      // Punto principale (quello dove hai rilasciato)
+      const marker = L.marker(ll, {icon:mkIcon('soft',''),draggable:true,zIndexOffset:-200}).addTo(map);
+      const wp = {latlng:ll,type:'soft',name:`via ${ll.lat.toFixed(3)},${ll.lng.toFixed(3)}`,marker,_id:mkId()};
+      marker.on('dragend',()=>{wp.latlng=marker.getLatLng();calcRoute();});
+      marker.on('dblclick',()=>removeSoft(wp._id));
+      all.splice(at,0,wp); at++; newWps.push(wp);
+
+      // Anchor dopo il punto
+      if (anchors.after) {
+        const bMk = L.marker(anchors.after,{icon:mkIcon('soft',''),draggable:true,zIndexOffset:-200}).addTo(map);
+        const bWp = {latlng:anchors.after,type:'soft',name:`via ${anchors.after.lat.toFixed(3)},${anchors.after.lng.toFixed(3)}`,marker:bMk,_id:mkId()};
+        bMk.on('dragend',()=>{bWp.latlng=bMk.getLatLng();calcRoute();});
+        bMk.on('dblclick',()=>removeSoft(bWp._id));
+        all.splice(at,0,bWp); at++; newWps.push(bWp);
+      }
 
       if (!S.softOpen) {
         S.softOpen=true;
@@ -652,6 +691,56 @@ function enableLineDrag(polyline) {
     map.on('mousemove', onMove);
     map.on('mouseup', onUp);
   });
+}
+
+// Trova i punti della polyline adiacenti al punto di drag
+// per usarli come anchor soft che guidano ORS sulla strada corretta
+function findPolylineAnchors(latlng, routeCoords, insertIdx, all) {
+  if (!routeCoords.length) return {before:null,after:null};
+
+  // Trova il segmento più vicino sulla polyline
+  function distToSeg(p,a,b){
+    const dx=b.lng-a.lng,dy=b.lat-a.lat;
+    if(!dx&&!dy) return haversine(p.lat,p.lng,a.lat,a.lng);
+    const t=Math.max(0,Math.min(1,((p.lat-a.lat)*dy+(p.lng-a.lng)*dx)/(dx*dx+dy*dy)));
+    return haversine(p.lat,p.lng,a.lat+t*dy,a.lng+t*dx);
+  }
+  let bestSeg=0,bestDist=Infinity;
+  for(let i=0;i<routeCoords.length-1;i++){
+    const d=distToSeg(latlng,routeCoords[i],routeCoords[i+1]);
+    if(d<bestDist){bestDist=d;bestSeg=i;}
+  }
+
+  // Prendi punti a ~200m prima e dopo lungo la polyline
+  const TARGET_DIST = 200; // metri
+  let before=null, after=null;
+
+  // Cerca punto ~200m prima del bestSeg
+  let acc=0;
+  for(let i=bestSeg;i>0;i--){
+    acc+=haversine(routeCoords[i].lat,routeCoords[i].lng,routeCoords[i-1].lat,routeCoords[i-1].lng);
+    if(acc>=TARGET_DIST){before=L.latLng(routeCoords[i-1].lat,routeCoords[i-1].lng);break;}
+  }
+
+  // Cerca punto ~200m dopo il bestSeg
+  acc=0;
+  for(let i=bestSeg+1;i<routeCoords.length-1;i++){
+    acc+=haversine(routeCoords[i].lat,routeCoords[i].lng,routeCoords[i+1].lat,routeCoords[i+1].lng);
+    if(acc>=TARGET_DIST){after=L.latLng(routeCoords[i+1].lat,routeCoords[i+1].lng);break;}
+  }
+
+  // Verifica che gli anchor non siano oltre i hard waypoint del tratto
+  // (per non sconfinare nel tratto adiacente)
+  const h = all.filter(w=>w.type!=='soft');
+  if(h.length>=2){
+    const hwBefore = h[Math.max(0, h.findIndex((_,i,a)=>all.indexOf(a[i])>=insertIdx)-1)];
+    const hwAfter  = h[Math.min(h.length-1, h.findIndex((_,i,a)=>all.indexOf(a[i])>=insertIdx))];
+    // Semplifica: usa anchor solo se sono sufficientemente distanti dal punto
+    if(before && haversine(before.lat,before.lng,latlng.lat,latlng.lng)<50) before=null;
+    if(after  && haversine(after.lat, after.lng, latlng.lat,latlng.lng)<50) after=null;
+  }
+
+  return {before, after};
 }
 
 // Trova l'indice di inserimento corretto nella lista waypoint.
