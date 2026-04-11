@@ -104,7 +104,7 @@ body{font-family:system-ui,sans-serif;background:#f0ede6;color:#1a1a1a;height:10
 </head>
 <body>
 <div id="topbar">
-  <h1>MotoRoute <span>planner</span></h1><span style="font-size:10px;color:#bbb;background:#f0ede6;padding:2px 7px;border-radius:10px;">v0.7</span>
+  <h1>MotoRoute <span>planner</span></h1><span style="font-size:10px;color:#bbb;background:#f0ede6;padding:2px 7px;border-radius:10px;">v0.8</span>
   <div class="sep"></div>
   <span style="font-size:10px;color:#bbb;">evita:</span>
   <button class="fbtn" id="f-mw">autostrade</button>
@@ -645,41 +645,22 @@ function enableLineDrag(polyline) {
       const ll = ev.latlng;
       const all = wps();
 
-      // Trova il segmento della polyline più vicino
+      // Trova il segmento più vicino e snappa il punto sulla polyline
       const insertIdx = findSegmentInsert(ll, S.routeCoords, all);
+      const snapped = snapToPolyline(ll, S.routeCoords);
+      const finalLL = snapped || ll;
 
-      // Trova i punti della polyline adiacenti al punto di inserimento
-      // e aggiungili come anchor soft per mantenere ORS sulla strada corretta
-      const anchors = findPolylineAnchors(ll, S.routeCoords, insertIdx, all);
-
-      // Inserisci prima gli anchor (in ordine), poi il punto principale
-      let at = insertIdx;
-      const newWps = [];
-
-      // Anchor prima del punto
-      if (anchors.before) {
-        const aMk = L.marker(anchors.before, {icon:mkIcon('soft',''),draggable:true,zIndexOffset:-200}).addTo(map);
-        const aWp = {latlng:anchors.before,type:'soft',name:`via ${anchors.before.lat.toFixed(3)},${anchors.before.lng.toFixed(3)}`,marker:aMk,_id:mkId()};
-        aMk.on('dragend',()=>{aWp.latlng=aMk.getLatLng();calcRoute();});
-        aMk.on('dblclick',()=>removeSoft(aWp._id));
-        all.splice(at,0,aWp); at++; newWps.push(aWp);
-      }
-
-      // Punto principale (quello dove hai rilasciato)
-      const marker = L.marker(ll, {icon:mkIcon('soft',''),draggable:true,zIndexOffset:-200}).addTo(map);
-      const wp = {latlng:ll,type:'soft',name:`via ${ll.lat.toFixed(3)},${ll.lng.toFixed(3)}`,marker,_id:mkId()};
-      marker.on('dragend',()=>{wp.latlng=marker.getLatLng();calcRoute();});
-      marker.on('dblclick',()=>removeSoft(wp._id));
-      all.splice(at,0,wp); at++; newWps.push(wp);
-
-      // Anchor dopo il punto
-      if (anchors.after) {
-        const bMk = L.marker(anchors.after,{icon:mkIcon('soft',''),draggable:true,zIndexOffset:-200}).addTo(map);
-        const bWp = {latlng:anchors.after,type:'soft',name:`via ${anchors.after.lat.toFixed(3)},${anchors.after.lng.toFixed(3)}`,marker:bMk,_id:mkId()};
-        bMk.on('dragend',()=>{bWp.latlng=bMk.getLatLng();calcRoute();});
-        bMk.on('dblclick',()=>removeSoft(bWp._id));
-        all.splice(at,0,bWp); at++; newWps.push(bWp);
-      }
+      const marker = L.marker(finalLL, {
+        icon:mkIcon('soft',''), draggable:true, zIndexOffset:-200
+      }).addTo(map);
+      const wp = {
+        latlng:finalLL, type:'soft',
+        name:`via ${finalLL.lat.toFixed(3)},${finalLL.lng.toFixed(3)}`,
+        marker, _id:mkId()
+      };
+      marker.on('dragend', ()=>{ wp.latlng=marker.getLatLng(); calcRoute(); });
+      marker.on('dblclick', ()=>removeSoft(wp._id));
+      all.splice(insertIdx, 0, wp);
 
       if (!S.softOpen) {
         S.softOpen=true;
@@ -691,6 +672,23 @@ function enableLineDrag(polyline) {
     map.on('mousemove', onMove);
     map.on('mouseup', onUp);
   });
+}
+
+// Snappa un punto alla polyline — proietta latlng sul segmento più vicino
+function snapToPolyline(latlng, routeCoords) {
+  if (!routeCoords||routeCoords.length<2) return null;
+  let bestDist=Infinity, bestPt=null;
+  for (let i=0;i<routeCoords.length-1;i++) {
+    const a=routeCoords[i], b=routeCoords[i+1];
+    const dx=b.lng-a.lng, dy=b.lat-a.lat;
+    if (!dx&&!dy) continue;
+    const t=Math.max(0,Math.min(1,((latlng.lat-a.lat)*dy+(latlng.lng-a.lng)*dx)/(dx*dx+dy*dy)));
+    const projLat=a.lat+t*dy, projLng=a.lng+t*dx;
+    const d=haversine(latlng.lat,latlng.lng,projLat,projLng);
+    if (d<bestDist) { bestDist=d; bestPt=L.latLng(projLat,projLng); }
+  }
+  // Snappa solo se il punto è abbastanza vicino alla polyline (< 500m)
+  return bestDist<500 ? bestPt : null;
 }
 
 // Trova i punti della polyline adiacenti al punto di drag
