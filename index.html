@@ -608,59 +608,56 @@ function enableLineDrag(polyline) {
 }
 
 // Trova l'indice di inserimento corretto nella lista waypoint.
-// Usa la distanza punto-segmento su ogni coppia di vertici consecutivi
-// della polyline — questo è robusto anche con percorsi che tornano indietro.
+// Strategia: per ogni coppia hard[i]→hard[i+1], trova il segmento
+// della porzione di polyline compreso tra quei due hard.
+// Questo evita ambiguità quando la strada passa vicino a se stessa.
 function findSegmentInsert(latlng, routeCoords, all) {
   if (!routeCoords.length) return all.length;
 
-  // Distanza punto P dal segmento AB (in coordinate geografiche approssimate)
   function distToSeg(p, a, b) {
-    const dx = b.lng-a.lng, dy = b.lat-a.lat;
-    if (dx===0&&dy===0) return haversine(p.lat,p.lng,a.lat,a.lng);
-    const t = Math.max(0,Math.min(1,((p.lat-a.lat)*dy+(p.lng-a.lng)*dx)/(dx*dx+dy*dy)));
+    const dx=b.lng-a.lng, dy=b.lat-a.lat;
+    if (!dx&&!dy) return haversine(p.lat,p.lng,a.lat,a.lng);
+    const t=Math.max(0,Math.min(1,((p.lat-a.lat)*dy+(p.lng-a.lng)*dx)/(dx*dx+dy*dy)));
     return haversine(p.lat,p.lng, a.lat+t*dy, a.lng+t*dx);
   }
 
-  // Trova il segmento della polyline più vicino al punto rilasciato
-  let bestSegIdx=0, bestDist=Infinity;
-  for (let i=0;i<routeCoords.length-1;i++) {
-    const d = distToSeg(latlng, routeCoords[i], routeCoords[i+1]);
-    if (d<bestDist) { bestDist=d; bestSegIdx=i; }
+  // Trova l'indice del punto della polyline più vicino a un waypoint
+  function nearestIdx(wp) {
+    let bi=0, bd=Infinity;
+    routeCoords.forEach((c,i)=>{
+      const d=haversine(wp.latlng.lat,wp.latlng.lng,c.lat,c.lng);
+      if(d<bd){bd=d;bi=i;}
+    });
+    return bi;
   }
 
-  // bestSegIdx = indice del primo vertice del segmento più vicino
-  // Usiamo il punto medio del segmento come posizione lungo la polyline
-  const segMidIdx = bestSegIdx + 0.5;
-  const totalSegs = Math.max(1, routeCoords.length-1);
-  const frac = segMidIdx / totalSegs;
-
-  // Per ogni hard waypoint, trova a che frazione della polyline si trova
-  // usando lo stesso algoritmo distanza-al-segmento
   const h = all.filter(w=>w.type!=='soft');
   if (h.length<2) return all.length;
 
-  const hardSegIdx = h.map(hw => {
-    let bi=0, bd=Infinity;
-    for (let i=0;i<routeCoords.length-1;i++) {
-      const d=distToSeg(hw.latlng, routeCoords[i], routeCoords[i+1]);
-      if (d<bd) { bd=d; bi=i; }
-    }
-    return (bi+0.5)/totalSegs;
-  });
+  // Per ogni hard waypoint trova il suo indice nella polyline
+  const hardPolyIdx = h.map(hw=>nearestIdx(hw));
 
-  // Trova tra quali due hard consecutivi cade la nostra frazione
-  let insertAfterHard=0;
-  for (let i=0;i<hardSegIdx.length-1;i++) {
-    if (frac>=hardSegIdx[i] && frac<=hardSegIdx[i+1]) {
-      insertAfterHard=i; break;
+  // Per ogni tratto hard[i]→hard[i+1], cerca il segmento più vicino
+  // SOLO nella porzione di polyline tra quei due indici
+  let bestTratto=-1, bestDist=Infinity;
+  for (let i=0;i<h.length-1;i++) {
+    const iStart=hardPolyIdx[i];
+    const iEnd=hardPolyIdx[i+1];
+    // Gestisce sia tratti in avanti che eventuali inversioni
+    const from=Math.min(iStart,iEnd);
+    const to=Math.max(iStart,iEnd);
+    for (let j=from;j<to;j++) {
+      const d=distToSeg(latlng, routeCoords[j], routeCoords[Math.min(j+1,routeCoords.length-1)]);
+      if (d<bestDist) { bestDist=d; bestTratto=i; }
     }
-    if (i===hardSegIdx.length-2) insertAfterHard=i;
   }
 
-  // Inserisci dopo l'ultimo soft che segue hard[insertAfterHard]
-  const hw = h[insertAfterHard];
-  const hwIdx = all.indexOf(hw);
-  let insertAt = hwIdx+1;
+  if (bestTratto<0) bestTratto=0;
+
+  // Inserisci dopo l'ultimo soft che segue hard[bestTratto]
+  const hw=h[bestTratto];
+  const hwIdx=all.indexOf(hw);
+  let insertAt=hwIdx+1;
   while (insertAt<all.length && all[insertAt].type==='soft') insertAt++;
   return insertAt;
 }
@@ -907,13 +904,25 @@ document.getElementById('btn-gpx').onclick=async()=>{
   // Semplifica con Douglas-Peucker
   const simplified=dpSimplify(coords,0.00005);
 
-  // Prova a ottenere elevazione da ORS
+  // Prova a ottenere elevazione da ORS (max 500 punti per richiesta)
   let withElev=simplified;
   try {
+    // ORS elevation accetta max ~2000 punti ma per sicurezza limitiamo a 500
+    let elevPts=simplified;
+    if(elevPts.length>500){
+      const step=Math.ceil(elevPts.length/500);
+      const sampled=[elevPts[0]];
+      for(let i=step;i<elevPts.length-1;i+=step) sampled.push(elevPts[i]);
+      sampled.push(elevPts[elevPts.length-1]);
+      elevPts=sampled;
+    }
     const body={
       format_in:'geojson',
       format_out:'geojson',
-      geometry:{type:'LineString',coordinates:simplified.map(p=>[p.lng,p.lat])}
+      geometry:{
+        type:'LineString',
+        coordinates:elevPts.map(p=>[parseFloat(p.lng.toFixed(6)),parseFloat(p.lat.toFixed(6))])
+      }
     };
     const r=await fetch(ORS_ELEV,{
       method:'POST',
@@ -923,9 +932,21 @@ document.getElementById('btn-gpx').onclick=async()=>{
     if(r.ok){
       const d=await r.json();
       const elCoords=d.geometry?.coordinates||[];
-      if(elCoords.length===simplified.length){
-        withElev=simplified.map((p,i)=>({...p,ele:elCoords[i][2]||0}));
+      if(elCoords.length===elevPts.length){
+        // Se abbiamo campionato, interpola l'elevazione sui punti originali
+        if(elevPts.length===simplified.length){
+          withElev=simplified.map((p,i)=>({...p,ele:parseFloat((elCoords[i][2]||0).toFixed(1))}));
+        } else {
+          // Mappa elevazione campionata → indici originali per interpolazione
+          const step=Math.ceil(simplified.length/elevPts.length);
+          withElev=simplified.map((p,i)=>{
+            const si=Math.min(Math.floor(i/step),elCoords.length-1);
+            return {...p,ele:parseFloat((elCoords[si][2]||0).toFixed(1))};
+          });
+        }
       }
+    } else {
+      console.warn('Elevation HTTP',r.status,'— skip');
     }
   } catch(e){ console.warn('elevation skip',e); }
 
