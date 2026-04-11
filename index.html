@@ -112,7 +112,7 @@ body{font-family:system-ui,sans-serif;background:#f0ede6;color:#1a1a1a;height:10
 </head>
 <body>
 <div id="topbar">
-  <h1>MotoRoute <span>planner</span></h1><span style="font-size:10px;color:#bbb;background:#f0ede6;padding:2px 7px;border-radius:10px;">v0.20</span>
+  <h1>MotoRoute <span>planner</span></h1><span style="font-size:10px;color:#bbb;background:#f0ede6;padding:2px 7px;border-radius:10px;">v0.21</span>
   <div class="sep"></div>
   <span style="font-size:10px;color:#bbb;">evita:</span>
   <button class="fbtn" id="f-mw">autostrade</button>
@@ -281,7 +281,7 @@ function renderSB() {
       const canDel = h.length>2 || (h.length===2&&hi>0);
       let sc=0;
       if (hi<h.length-1) {
-        const iA=all.indexOf(wp), iB=all.indexOf(h[i+1]);
+        const iA=all.indexOf(wp), iB=all.indexOf(h[hi+1]);
         if (iA>=0&&iB>iA) sc=all.slice(iA+1,iB).filter(w=>w.type==='soft').length;
       }
       // Pannello configurazione tratto (mostrato sotto ogni tappa tranne l'ultima)
