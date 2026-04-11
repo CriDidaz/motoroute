@@ -104,7 +104,7 @@ body{font-family:system-ui,sans-serif;background:#f0ede6;color:#1a1a1a;height:10
 </head>
 <body>
 <div id="topbar">
-  <h1>MotoRoute <span>planner</span></h1><span style="font-size:10px;color:#bbb;background:#f0ede6;padding:2px 7px;border-radius:10px;">v0.14</span>
+  <h1>MotoRoute <span>planner</span></h1><span style="font-size:10px;color:#bbb;background:#f0ede6;padding:2px 7px;border-radius:10px;">v0.15</span>
   <div class="sep"></div>
   <span style="font-size:10px;color:#bbb;">evita:</span>
   <button class="fbtn" id="f-mw">autostrade</button>
@@ -659,14 +659,18 @@ async function calcTratto(tratto, avoidFeatures) {
   };
 
   // Bearings per ogni waypoint — ORS rispetta la direzione lungo la rotta
-  // Evita inversioni (es. giro del lago dalla parte sbagliata)
+  // Formato ufficiale ORS: [[angolo, deviazione], ...] con un elemento per waypoint
+  // [0, 360] = qualsiasi direzione (nessun vincolo)
+  // Solo se la rotta è già calcolata — altrimenti ORS sceglie liberamente
   if(filtered.length>=2 && S.routeCoords.length>0){
     const bearings = filtered.map(w=>{
       const b = polylineBearingAt(w.latlng, S.routeCoords);
-      // ORS vuole [valore, deviazione] oppure [] per "nessun vincolo"
-      return b!==null ? [Math.round(b), 60] : [];
+      return b!==null ? [Math.round(b), 60] : [0, 360];
     });
-    body.bearings = bearings;
+    // Usa bearings solo se almeno un punto ha un vincolo reale
+    if(bearings.some(b=>b[1]!==360)){
+      body.bearings = bearings;
+    }
   }
 
   // Avoid: filtri manuali + traccia
