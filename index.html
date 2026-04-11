@@ -568,43 +568,57 @@ function enableLineDrag(polyline) {
   });
 }
 
-// Trova l'indice di inserimento corretto nella lista waypoint
-// basandosi sul segmento della polyline più vicino al punto rilasciato
+// Trova l'indice di inserimento corretto nella lista waypoint.
+// Usa la distanza punto-segmento su ogni coppia di vertici consecutivi
+// della polyline — questo è robusto anche con percorsi che tornano indietro.
 function findSegmentInsert(latlng, routeCoords, all) {
   if (!routeCoords.length) return all.length;
 
-  // Trova il punto della polyline più vicino
-  let bestIdx=0, bestDist=Infinity;
-  routeCoords.forEach((c,i)=>{
-    const d = haversine(latlng.lat,latlng.lng,c.lat,c.lng);
-    if (d<bestDist) { bestDist=d; bestIdx=i; }
-  });
+  // Distanza punto P dal segmento AB (in coordinate geografiche approssimate)
+  function distToSeg(p, a, b) {
+    const dx = b.lng-a.lng, dy = b.lat-a.lat;
+    if (dx===0&&dy===0) return haversine(p.lat,p.lng,a.lat,a.lng);
+    const t = Math.max(0,Math.min(1,((p.lat-a.lat)*dy+(p.lng-a.lng)*dx)/(dx*dx+dy*dy)));
+    return haversine(p.lat,p.lng, a.lat+t*dy, a.lng+t*dx);
+  }
 
-  // Frazione lungo la polyline (0=inizio, 1=fine)
-  const frac = bestIdx/Math.max(1,routeCoords.length-1);
+  // Trova il segmento della polyline più vicino al punto rilasciato
+  let bestSegIdx=0, bestDist=Infinity;
+  for (let i=0;i<routeCoords.length-1;i++) {
+    const d = distToSeg(latlng, routeCoords[i], routeCoords[i+1]);
+    if (d<bestDist) { bestDist=d; bestSegIdx=i; }
+  }
 
-  // Trova i waypoint hard che delimitano questa frazione
+  // bestSegIdx = indice del primo vertice del segmento più vicino
+  // Usiamo il punto medio del segmento come posizione lungo la polyline
+  const segMidIdx = bestSegIdx + 0.5;
+  const totalSegs = Math.max(1, routeCoords.length-1);
+  const frac = segMidIdx / totalSegs;
+
+  // Per ogni hard waypoint, trova a che frazione della polyline si trova
+  // usando lo stesso algoritmo distanza-al-segmento
   const h = all.filter(w=>w.type!=='soft');
   if (h.length<2) return all.length;
 
-  // Calcola la frazione di ogni hard waypoint lungo la polyline
-  const hardFracs = h.map(hw=>{
+  const hardSegIdx = h.map(hw => {
     let bi=0, bd=Infinity;
-    routeCoords.forEach((c,i)=>{
-      const d=haversine(hw.latlng.lat,hw.latlng.lng,c.lat,c.lng);
-      if(d<bd){bd=d;bi=i;}
-    });
-    return bi/Math.max(1,routeCoords.length-1);
+    for (let i=0;i<routeCoords.length-1;i++) {
+      const d=distToSeg(hw.latlng, routeCoords[i], routeCoords[i+1]);
+      if (d<bd) { bd=d; bi=i; }
+    }
+    return (bi+0.5)/totalSegs;
   });
 
-  // Trova tra quali due hard il punto cade
+  // Trova tra quali due hard consecutivi cade la nostra frazione
   let insertAfterHard=0;
-  for (let i=0;i<hardFracs.length-1;i++) {
-    if (frac>=hardFracs[i]&&frac<=hardFracs[i+1]) { insertAfterHard=i; break; }
-    if (i===hardFracs.length-2) insertAfterHard=i;
+  for (let i=0;i<hardSegIdx.length-1;i++) {
+    if (frac>=hardSegIdx[i] && frac<=hardSegIdx[i+1]) {
+      insertAfterHard=i; break;
+    }
+    if (i===hardSegIdx.length-2) insertAfterHard=i;
   }
 
-  // Inserisci dopo tutti i soft che seguono hard[insertAfterHard]
+  // Inserisci dopo l'ultimo soft che segue hard[insertAfterHard]
   const hw = h[insertAfterHard];
   const hwIdx = all.indexOf(hw);
   let insertAt = hwIdx+1;
