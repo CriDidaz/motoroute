@@ -112,7 +112,7 @@ body{font-family:system-ui,sans-serif;background:#f0ede6;color:#1a1a1a;height:10
 </head>
 <body>
 <div id="topbar">
-  <h1>MotoRoute <span>planner</span></h1><span style="font-size:10px;color:#bbb;background:#f0ede6;padding:2px 7px;border-radius:10px;">v0.19</span>
+  <h1>MotoRoute <span>planner</span></h1><span style="font-size:10px;color:#bbb;background:#f0ede6;padding:2px 7px;border-radius:10px;">v0.20</span>
   <div class="sep"></div>
   <span style="font-size:10px;color:#bbb;">evita:</span>
   <button class="fbtn" id="f-mw">autostrade</button>
@@ -275,12 +275,12 @@ function renderSB() {
   if (!h.length) {
     hEl.innerHTML = '<div style="color:#ccc;font-size:11px;padding:8px 0 4px;">click dx sulla mappa per iniziare</div>';
   } else {
-    hEl.innerHTML = h.map((wp,i) => {
-      const pinC = i===0?'S': i===h.length-1?'E':'H';
-      const label = i===0?'A': i===h.length-1?String.fromCharCode(65+h.length-1):String.fromCharCode(65+i);
-      const canDel = h.length>2 || (h.length===2&&i>0);
+    hEl.innerHTML = h.map((wp,hi) => {
+      const pinC = hi===0?'S': hi===h.length-1?'E':'H';
+      const label = hi===0?'A': hi===h.length-1?String.fromCharCode(65+h.length-1):String.fromCharCode(65+hi);
+      const canDel = h.length>2 || (h.length===2&&hi>0);
       let sc=0;
-      if (i<h.length-1) {
+      if (hi<h.length-1) {
         const iA=all.indexOf(wp), iB=all.indexOf(h[i+1]);
         if (iA>=0&&iB>iA) sc=all.slice(iA+1,iB).filter(w=>w.type==='soft').length;
       }
@@ -1028,8 +1028,12 @@ siEl.addEventListener('input', ()=>{
         if (!res.length) { srEl.innerHTML='<div class="sri"><span style="color:#ccc;">nessun risultato</span></div>'; srEl.style.display='block'; return; }
         srEl.innerHTML=res.map((r,i)=>{
           const a=r.address||{};
-          const n=r.name||r.display_name.split(',')[0];
-          const s=[a.road,a.house_number,a.village||a.town||a.city,a.county].filter(Boolean).join(', ');
+          // Mostra indirizzo completo con numero civico
+          const road = a.road||'';
+          const num = a.house_number||'';
+          const city = a.village||a.town||a.city||a.county||'';
+          const n = (road&&num) ? `${road} ${num}, ${city}` : r.name||r.display_name.split(',')[0];
+          const s = [city, a.state].filter(Boolean).join(', ');
           return `<div class="sri"><div class="sri-n">${n}</div><div class="sri-s">${s}</div>
             <div class="sri-a">
               <button class="srib h" onclick="addFS(${i},'hard')">+ tappa</button>
