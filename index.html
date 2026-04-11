@@ -104,7 +104,7 @@ body{font-family:system-ui,sans-serif;background:#f0ede6;color:#1a1a1a;height:10
 </head>
 <body>
 <div id="topbar">
-  <h1>MotoRoute <span>planner</span></h1><span style="font-size:10px;color:#bbb;background:#f0ede6;padding:2px 7px;border-radius:10px;">v0.8</span>
+  <h1>MotoRoute <span>planner</span></h1><span style="font-size:10px;color:#bbb;background:#f0ede6;padding:2px 7px;border-radius:10px;">v0.9</span>
   <div class="sep"></div>
   <span style="font-size:10px;color:#bbb;">evita:</span>
   <button class="fbtn" id="f-mw">autostrade</button>
@@ -1039,79 +1039,57 @@ function applyMapMatching(coords, all){
   const h = all.filter(w=>w.type!=='soft');
   if(h.length<2) return;
 
-  // Filtra la traccia solo tra partenza e arrivo (per evitare punti fuori percorso)
-  const start = h[0].latlng, end = h[h.length-1].latlng;
-
-  // Trova indice più vicino a partenza e arrivo nella traccia
-  let iStart=0, iEnd=coords.length-1, dS=Infinity, dE=Infinity;
-  coords.forEach((c,i)=>{
-    const ds=haversine(start.lat,start.lng,c.lat,c.lng);
-    const de=haversine(end.lat,end.lng,c.lat,c.lng);
-    if(ds<dS){dS=ds;iStart=i;}
-    if(de<dE){dE=de;iEnd=i;}
-  });
-  if(iStart>iEnd){const t=iStart;iStart=iEnd;iEnd=t;}
-  const slice = coords.slice(iStart, iEnd+1);
-  if(slice.length<3) return;
-
-  // Douglas-Peucker adattivo — mira a ~30 punti chiave
-  // Aumenta la tolleranza finché non otteniamo un numero ragionevole
-  // Mira a 40-50 punti chiave per una copertura più fedele della traccia
-  let simplified = slice;
-  for(const tol of [0.0002, 0.0005, 0.001, 0.002, 0.005, 0.01]){
-    simplified = dpSimplify(slice, tol);
-    if(simplified.length<=50) break;
-  }
-  // Se ancora troppi, taglia a 50
-  if(simplified.length>50){
-    const step=Math.ceil(simplified.length/50);
-    const out=[simplified[0]];
-    for(let i=step;i<simplified.length-1;i+=step) out.push(simplified[i]);
-    out.push(simplified[simplified.length-1]);
-    simplified=out;
-  }
-
-  // Rimuovi primo e ultimo (sono partenza/arrivo già presenti come hard)
-  const interior = simplified.slice(1,-1);
-  if(!interior.length) return;
-
-  // Inserisci come soft waypoint tra il primo e l'ultimo hard
-  // (se ci sono hard intermedi, inserisci proporzionalmente)
-  const firstHardIdx = all.indexOf(h[0]);
-  const lastHardIdx  = all.indexOf(h[h.length-1]);
-
-  // Rimuovi eventuali soft già presenti tra primo e ultimo hard
-  // (pulizia prima di reinserire)
-  let i=firstHardIdx+1;
-  while(i<all.length && all[i]!==h[h.length-1]){
+  // Rimuovi tutti i soft esistenti prima di reinserire
+  for(let i=all.length-1;i>=0;i--){
     if(all[i].type==='soft'){
       if(all[i].marker) map.removeLayer(all[i].marker);
       all.splice(i,1);
-    } else i++;
+    }
   }
 
-  // Inserisci i nuovi soft — NO revGeo (evita flood Nominatim)
-  // I soft del map matching sono punti tecnici, le coordinate bastano
-  let insertAt = all.indexOf(h[h.length-1]); // prima dell'ultimo hard
-  interior.forEach(c=>{
-    const ll = L.latLng(c.lat, c.lng);
-    const marker = L.marker(ll,{
-      icon:mkIcon('soft',''), draggable:true, zIndexOffset:-200
-    }).addTo(map);
-    const wp = {
-      latlng:ll, type:'soft',
-      name:`via ${c.lat.toFixed(3)},${c.lng.toFixed(3)}`,
-      marker, _id:mkId()
-    };
-    marker.on('dragend',()=>{
-      wp.latlng=marker.getLatLng();
-      // revGeo solo al drag manuale, non all'inserimento massivo
-      revGeo(wp.latlng,wp);
-      calcRoute();
+  // Per ogni coppia hard[i]→hard[i+1]
+  // campiona MAX 6 punti equidistanti dalla traccia GPS come soft
+  // Pochi punti = ORS segue la direzione naturale senza loop
+  h.forEach((hw,hi)=>{
+    if(hi===h.length-1) return;
+    const hwNext = h[hi+1];
+
+    // Trova indici nella traccia più vicini ai due hard
+    let iA=0,iB=coords.length-1,dA=Infinity,dB=Infinity;
+    coords.forEach((c,ci)=>{
+      const da=haversine(hw.latlng.lat,hw.latlng.lng,c.lat,c.lng);
+      const db=haversine(hwNext.latlng.lat,hwNext.latlng.lng,c.lat,c.lng);
+      if(da<dA){dA=da;iA=ci;}
+      if(db<dB){dB=db;iB=ci;}
     });
-    marker.on('dblclick',()=>removeSoft(wp._id));
-    all.splice(insertAt, 0, wp);
-    insertAt++;
+    if(iA>iB){const t=iA;iA=iB;iB=t;}
+
+    const slice=coords.slice(iA,iB+1);
+    if(slice.length<3) return;
+
+    // Max 6 punti interni equidistanti
+    const MAX_PTS=6;
+    const interior=[];
+    if(slice.length<=MAX_PTS+2){
+      for(let i=1;i<slice.length-1;i++) interior.push(slice[i]);
+    } else {
+      const step=(slice.length-2)/(MAX_PTS+1);
+      for(let i=1;i<=MAX_PTS;i++){
+        const ci=Math.round(i*step);
+        interior.push(slice[Math.min(ci,slice.length-2)]);
+      }
+    }
+
+    // Inserisci i soft prima di hwNext
+    const insertPos=all.indexOf(hwNext);
+    interior.forEach((c,ci)=>{
+      const ll=L.latLng(c.lat,c.lng);
+      const marker=L.marker(ll,{icon:mkIcon('soft',''),draggable:true,zIndexOffset:-200}).addTo(map);
+      const wp={latlng:ll,type:'soft',name:`via ${c.lat.toFixed(3)},${c.lng.toFixed(3)}`,marker,_id:mkId()};
+      marker.on('dragend',()=>{wp.latlng=marker.getLatLng();calcRoute();});
+      marker.on('dblclick',()=>removeSoft(wp._id));
+      all.splice(insertPos+ci,0,wp);
+    });
   });
 
   if(!S.softOpen){
@@ -1119,98 +1097,11 @@ function applyMapMatching(coords, all){
     document.getElementById('sl').classList.add('o');
     document.getElementById('sa').classList.add('o');
   }
-  refreshIcons(); renderSB();
-  toast(`${interior.length} punti guida estratti dalla traccia`);
+  refreshIcons();renderSB();
+  const tot=all.filter(w=>w.type==='soft').length;
+  toast(`${tot} punti guida dalla traccia — premi calcola percorso`);
 }
 
-// ═══════════════════════════════════════════════════════════════
-// EXPORT GPX (con elevazione ORS)
-// ═══════════════════════════════════════════════════════════════
-document.getElementById('btn-gpx').onclick=async()=>{
-  const coords=S.routeCoords.length?S.routeCoords:S.importedCoords;
-  if(!coords.length){toast('Calcola prima un percorso.');return;}
-  const layer=S.layers[S.active], h=hard(), now=new Date().toISOString();
-
-  // Semplifica con Douglas-Peucker
-  const simplified=dpSimplify(coords,0.00005);
-
-  // Prova a ottenere elevazione da ORS (max 500 punti per richiesta)
-  let withElev=simplified;
-  try {
-    // ORS elevation accetta max ~2000 punti ma per sicurezza limitiamo a 500
-    let elevPts=simplified;
-    if(elevPts.length>500){
-      const step=Math.ceil(elevPts.length/500);
-      const sampled=[elevPts[0]];
-      for(let i=step;i<elevPts.length-1;i+=step) sampled.push(elevPts[i]);
-      sampled.push(elevPts[elevPts.length-1]);
-      elevPts=sampled;
-    }
-    const body={
-      format_in:'geojson',
-      format_out:'geojson',
-      geometry:{
-        type:'LineString',
-        coordinates:elevPts.map(p=>[parseFloat(p.lng.toFixed(6)),parseFloat(p.lat.toFixed(6))])
-      }
-    };
-    const r=await fetch(ORS_ELEV,{
-      method:'POST',
-      headers:{'Content-Type':'application/json','Authorization':ORS_KEY},
-      body:JSON.stringify(body)
-    });
-    if(r.ok){
-      const d=await r.json();
-      const elCoords=d.geometry?.coordinates||[];
-      if(elCoords.length===elevPts.length){
-        // Se abbiamo campionato, interpola l'elevazione sui punti originali
-        if(elevPts.length===simplified.length){
-          withElev=simplified.map((p,i)=>({...p,ele:parseFloat((elCoords[i][2]||0).toFixed(1))}));
-        } else {
-          // Mappa elevazione campionata → indici originali per interpolazione
-          const step=Math.ceil(simplified.length/elevPts.length);
-          withElev=simplified.map((p,i)=>{
-            const si=Math.min(Math.floor(i/step),elCoords.length-1);
-            return {...p,ele:parseFloat((elCoords[si][2]||0).toFixed(1))};
-          });
-        }
-      }
-    } else {
-      console.warn('Elevation HTTP',r.status,'— skip');
-    }
-  } catch(e){ console.warn('elevation skip',e); }
-
-  let gpx=`<?xml version="1.0" encoding="UTF-8"?>\n<gpx version="1.1" creator="MotoRoute Planner" xmlns="http://www.topografix.com/GPX/1/1">\n  <metadata><n>${layer.name}</n><time>${now}</time></metadata>\n`;
-  h.forEach((wp,i)=>{
-    const role=i===0?'Partenza':i===h.length-1?'Arrivo':`Tappa ${i}`;
-    const sym=i===0?'Flag, Green':i===h.length-1?'Flag, Red':'Flag, Blue';
-    gpx+=`  <wpt lat="${wp.latlng.lat.toFixed(6)}" lon="${wp.latlng.lng.toFixed(6)}"><n>${role}: ${wp.name}</n><sym>${sym}</sym></wpt>\n`;
-  });
-  gpx+=`  <trk><n>${layer.name}</n><trkseg>\n`;
-  withElev.forEach(pt=>{
-    gpx+=`    <trkpt lat="${pt.lat.toFixed(6)}" lon="${pt.lng.toFixed(6)}">${pt.ele!==undefined?`<ele>${pt.ele.toFixed(1)}</ele>`:''}</trkpt>\n`;
-  });
-  gpx+=`  </trkseg></trk>\n</gpx>`;
-  dl(gpx,'application/gpx+xml',`${layer.name.replace(/\s+/g,'-')}.gpx`);
-  toast(`GPX esportato — ${withElev.length} punti${withElev[0]?.ele!==undefined?' con quota':''}` );
-};
-
-document.getElementById('btn-kml').onclick=()=>{
-  const all=wps(); if(all.length<2){toast('Aggiungi almeno 2 tappe.');return;}
-  const layer=S.layers[S.active];
-  let kml=`<?xml version="1.0" encoding="UTF-8"?>\n<kml xmlns="http://www.opengis.net/kml/2.2"><Document><n>${layer.name}</n>\n`;
-  all.forEach((wp,i)=>{
-    const lbl=i===0?'Partenza':i===all.length-1?'Arrivo':wp.type==='soft'?`Guida: ${wp.name}`:`Tappa: ${wp.name}`;
-    kml+=`  <Placemark><n>${lbl}</n><Point><coordinates>${wp.latlng.lng.toFixed(6)},${wp.latlng.lat.toFixed(6)},0</coordinates></Point></Placemark>\n`;
-  });
-  kml+=`</Document></kml>`;
-  dl(kml,'application/vnd.google-earth.kml+xml',`${layer.name.replace(/\s+/g,'-')}.kml`);
-  toast('KML esportato');
-};
-
-// ═══════════════════════════════════════════════════════════════
-// UTILS
-// ═══════════════════════════════════════════════════════════════
 function dpSimplify(pts,tol){
   if(pts.length<=2) return pts;
   let maxD=0,maxI=0; const s=pts[0],e=pts[pts.length-1];
