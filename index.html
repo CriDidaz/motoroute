@@ -104,14 +104,18 @@ body{font-family:system-ui,sans-serif;background:#f0ede6;color:#1a1a1a;height:10
 </head>
 <body>
 <div id="topbar">
-  <h1>MotoRoute <span>planner</span></h1><span style="font-size:10px;color:#bbb;background:#f0ede6;padding:2px 7px;border-radius:10px;">v0.16</span>
+  <h1>MotoRoute <span>planner</span></h1><span style="font-size:10px;color:#bbb;background:#f0ede6;padding:2px 7px;border-radius:10px;">v0.17</span>
   <div class="sep"></div>
   <span style="font-size:10px;color:#bbb;">evita:</span>
   <button class="fbtn" id="f-mw">autostrade</button>
   <button class="fbtn" id="f-tl">pedaggi</button>
   <button class="fbtn on" id="f-fy">traghetti</button>
   <div class="sep"></div>
-  <button class="fbtn" id="f-sc">panoramiche</button>
+  <div class="sep"></div>
+  <span style="font-size:10px;color:#bbb;">stile:</span>
+  <button class="fbtn" id="p-fast">veloce</button>
+  <button class="fbtn on" id="p-bal">bilanciato</button>
+  <button class="fbtn" id="p-scenic">panoramico</button>
   <div id="tbr">
     <button class="abtn sec" id="btn-imp">↑ importa</button>
     <input type="file" id="fi" accept=".gpx,.kml"/>
@@ -193,7 +197,8 @@ const S = {
     {name:'Giorno 2', wps:[], color:COLORS[1]}
   ],
   active: 0,
-  filters: {motorway:false, toll:false, ferry:true, scenic:false},
+  filters: {motorway:false, toll:false, ferry:true},
+  preset: 'balanced', // 'fast' | 'balanced' | 'scenic'
   routeLine: null,
   routeCoords: [],
   orsLegs: [],
@@ -560,22 +565,14 @@ async function _doCalcRoute() {
     });
   }
 
+  // Avoid features dai filtri manuali dell'utente
+  // Il preset gestisce autonomamente gli avoid aggiuntivi in calcTratto
   const av=[];
-  if (S.filters.motorway) av.push('highways');
-  if (S.filters.toll)     av.push('tollways');
-  if (S.filters.ferry)    av.push('ferries');
-  // Se ci sono soft in un tratto, l'utente sta correggendo la rotta manualmente
-  // → evita autostrade per quel tratto per non fare loop
-  // (viene passato come avoidFeatures al singolo calcTratto)
+  if(S.filters.motorway) av.push('highways');
+  if(S.filters.toll)     av.push('tollways');
+  if(S.filters.ferry)    av.push('ferries');
 
-  // Calcola ogni tratto in parallelo
-  const results = await Promise.all(tratti.map(t => {
-    // Se il tratto ha soft (correzione manuale), evita autostrade per non fare loop
-    const tractAv = [...av];
-    if(t.softs.length>0 && !tractAv.includes('highways'))
-      tractAv.push('highways');
-    return calcTratto(t, tractAv);
-  }));
+    const results = await Promise.all(tratti.map(t => calcTratto(t, av)));
 
   // Verifica che tutti siano ok
   const allOk = results.every(r=>r!==null);
@@ -654,9 +651,18 @@ async function calcTratto(tratto, avoidFeatures) {
     return {coords:[{lat:from.latlng.lat,lng:from.latlng.lng},{lat:to.latlng.lat,lng:to.latlng.lng}],dist:d,dur:d/50*3600,legs:[]};
   }
 
+  // Parametri routing basati su preset + filtri manuali
+  // Documentazione ORS: https://giscience.github.io/openrouteservice/api-reference/endpoints/directions/
+  const presetParams = {
+    fast:    {preference:'fastest',  maxSpeed:null},
+    balanced:{preference:'recommended', maxSpeed:null},
+    scenic:  {preference:'shortest', maxSpeed:70}
+  };
+  const pp = presetParams[S.preset] || presetParams.balanced;
+
   const body = {
     coordinates: coords,
-    preference: S.filters.scenic ? 'shortest' : 'recommended',
+    preference: pp.preference,
     geometry: true,
     instructions: true,
     elevation: false,
@@ -664,11 +670,14 @@ async function calcTratto(tratto, avoidFeatures) {
     language: 'it'
   };
 
-  // bearings rimosso — causa 400 con configurazione ORS pubblica
+  if(pp.maxSpeed) body.maximum_speed = pp.maxSpeed;
 
-  // Avoid: filtri manuali + traccia
-  const traceAvoid = S.traceParams ? S.traceParams.avoidFeatures : [];
-  const allAvoid = [...new Set([...avoidFeatures, ...traceAvoid])];
+  // Avoid features: filtri manuali espliciti
+  // Per preset scenic aggiungi highways/tollways automaticamente
+  const autoAvoid = [];
+  if(S.preset==='scenic') { autoAvoid.push('highways','tollways'); }
+  const manualAvoid = [...avoidFeatures]; // passati dal chiamante
+  const allAvoid = [...new Set([...manualAvoid, ...autoAvoid])];
   if(allAvoid.length) body.options = {avoid_features: allAvoid};
 
   try {
@@ -1043,10 +1052,20 @@ document.getElementById('add-day').onclick=()=>{
 // ═══════════════════════════════════════════════════════════════
 // FILTERS
 // ═══════════════════════════════════════════════════════════════
-[['f-mw','motorway'],['f-tl','toll'],['f-fy','ferry'],['f-sc','scenic']].forEach(([id,key])=>{
+[['f-mw','motorway'],['f-tl','toll'],['f-fy','ferry']].forEach(([id,key])=>{
   document.getElementById(id).addEventListener('click',function(){
     S.filters[key]=!S.filters[key];
     this.classList.toggle('on',S.filters[key]);
+    calcRoute();
+  });
+});
+
+// Preset routing
+[['p-fast','fast'],['p-bal','balanced'],['p-scenic','scenic']].forEach(([id,preset])=>{
+  document.getElementById(id).addEventListener('click',function(){
+    S.preset=preset;
+    document.querySelectorAll('#p-fast,#p-bal,#p-scenic').forEach(b=>b.classList.remove('on'));
+    this.classList.add('on');
     calcRoute();
   });
 });
