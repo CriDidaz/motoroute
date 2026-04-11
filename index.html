@@ -359,14 +359,25 @@ document.getElementById('st').addEventListener('click', () => {
 // ═══════════════════════════════════════════════════════════════
 // GEOCODING (reverse)
 // ═══════════════════════════════════════════════════════════════
+// Rate-limited reverse geocoding — max 1 req/secondo verso Nominatim
+const _geoQueue = [];
+let _geoRunning = false;
 function revGeo(latlng, wp) {
+  _geoQueue.push({latlng, wp});
+  if (!_geoRunning) _processGeoQueue();
+}
+function _processGeoQueue() {
+  if (!_geoQueue.length) { _geoRunning=false; return; }
+  _geoRunning = true;
+  const {latlng, wp} = _geoQueue.shift();
   fetch(`https://nominatim.openstreetmap.org/reverse?lat=${latlng.lat}&lon=${latlng.lng}&format=json`)
     .then(r=>r.json()).then(d=>{
       const a=d.address||{};
       wp.name = [a.road,a.house_number,a.village||a.town||a.city].filter(Boolean).join(' ')
                 || `${latlng.lat.toFixed(3)},${latlng.lng.toFixed(3)}`;
       renderSB();
-    }).catch(()=>{});
+    }).catch(()=>{})
+    .finally(()=>setTimeout(_processGeoQueue, 1100)); // 1.1s tra richieste
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -958,10 +969,19 @@ function applyMapMatching(coords, all){
 
   // Douglas-Peucker adattivo — mira a ~30 punti chiave
   // Aumenta la tolleranza finché non otteniamo un numero ragionevole
+  // Mira a 40-50 punti chiave per una copertura più fedele della traccia
   let simplified = slice;
-  for(const tol of [0.0005, 0.001, 0.002, 0.005, 0.01]){
+  for(const tol of [0.0002, 0.0005, 0.001, 0.002, 0.005, 0.01]){
     simplified = dpSimplify(slice, tol);
-    if(simplified.length<=35) break;
+    if(simplified.length<=50) break;
+  }
+  // Se ancora troppi, taglia a 50
+  if(simplified.length>50){
+    const step=Math.ceil(simplified.length/50);
+    const out=[simplified[0]];
+    for(let i=step;i<simplified.length-1;i+=step) out.push(simplified[i]);
+    out.push(simplified[simplified.length-1]);
+    simplified=out;
   }
 
   // Rimuovi primo e ultimo (sono partenza/arrivo già presenti come hard)
@@ -983,20 +1003,28 @@ function applyMapMatching(coords, all){
     } else i++;
   }
 
-  // Inserisci i nuovi soft
+  // Inserisci i nuovi soft — NO revGeo (evita flood Nominatim)
+  // I soft del map matching sono punti tecnici, le coordinate bastano
   let insertAt = all.indexOf(h[h.length-1]); // prima dell'ultimo hard
   interior.forEach(c=>{
     const ll = L.latLng(c.lat, c.lng);
     const marker = L.marker(ll,{
       icon:mkIcon('soft',''), draggable:true, zIndexOffset:-200
     }).addTo(map);
-    const wp = {latlng:ll, type:'soft', name:`${c.lat.toFixed(4)},${c.lng.toFixed(4)}`, marker, _id:mkId()};
-    marker.on('dragend',()=>{ wp.latlng=marker.getLatLng(); revGeo(wp.latlng,wp); calcRoute(); });
+    const wp = {
+      latlng:ll, type:'soft',
+      name:`via ${c.lat.toFixed(3)},${c.lng.toFixed(3)}`,
+      marker, _id:mkId()
+    };
+    marker.on('dragend',()=>{
+      wp.latlng=marker.getLatLng();
+      // revGeo solo al drag manuale, non all'inserimento massivo
+      revGeo(wp.latlng,wp);
+      calcRoute();
+    });
     marker.on('dblclick',()=>removeSoft(wp._id));
     all.splice(insertAt, 0, wp);
     insertAt++;
-    // Reverse geocode asincrono (non blocca)
-    revGeo(ll, wp);
   });
 
   if(!S.softOpen){
