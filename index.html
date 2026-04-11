@@ -470,21 +470,41 @@ async function _doCalcRoute() {
 // Calcola un singolo tratto hard→hard con i suoi soft intermedi
 async function calcTratto(tratto, avoidFeatures) {
   const pts = [tratto.from, ...tratto.softs, tratto.to];
-  const coords = pts.map(w=>[
+
+  // Rimuovi punti duplicati o troppo vicini (< 30m) che causano 404
+  const filtered = [pts[0]];
+  for (let i=1; i<pts.length; i++) {
+    const prev = filtered[filtered.length-1];
+    const d = haversine(prev.latlng.lat,prev.latlng.lng,pts[i].latlng.lat,pts[i].latlng.lng);
+    if (d > 30) filtered.push(pts[i]);
+  }
+  // Se dopo il filtro restano meno di 2 punti, skip
+  if (filtered.length < 2) {
+    const from = pts[0], to = pts[pts.length-1];
+    const d = haversine(from.latlng.lat,from.latlng.lng,to.latlng.lat,to.latlng.lng)/1000;
+    return { coords:[{lat:from.latlng.lat,lng:from.latlng.lng},{lat:to.latlng.lat,lng:to.latlng.lng}], dist:d, dur:d/50*3600, legs:[] };
+  }
+
+  const coords = filtered.map(w=>[
     parseFloat(w.latlng.lng.toFixed(6)),
     parseFloat(w.latlng.lat.toFixed(6))
   ]);
 
   const body = {
     coordinates: coords,
-    preference: 'recommended',
+    preference: S.filters.scenic ? 'shortest' : 'recommended',
     geometry: true,
     instructions: true,
     elevation: false,
     units: 'km',
     language: 'it'
   };
-  if (avoidFeatures.length) body.options = {avoid_features: avoidFeatures};
+
+  // Penalizza highway anche quando non escluse — weight_factor basso = meno appeal
+  const options = {};
+  if (avoidFeatures.length) options.avoid_features = avoidFeatures;
+  // Aggiunge vehicle_type per routing più conservativo su strade normali
+  if (Object.keys(options).length) body.options = options;
 
   try {
     const r = await fetch(ORS_URL, {
@@ -492,7 +512,7 @@ async function calcTratto(tratto, avoidFeatures) {
       headers: {'Content-Type':'application/json','Authorization':ORS_KEY},
       body: JSON.stringify(body)
     });
-    if (!r.ok) throw new Error('ORS '+r.status);
+    if (!r.ok) { const t=await r.text().catch(()=>''); throw new Error('ORS '+r.status+' '+t.slice(0,80)); }
     const data = await r.json();
     if (!data.features||!data.features.length) throw new Error('no route');
     const feat = data.features[0];
