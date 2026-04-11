@@ -104,7 +104,7 @@ body{font-family:system-ui,sans-serif;background:#f0ede6;color:#1a1a1a;height:10
 </head>
 <body>
 <div id="topbar">
-  <h1>MotoRoute <span>planner</span></h1><span style="font-size:10px;color:#bbb;background:#f0ede6;padding:2px 7px;border-radius:10px;">v0.11</span>
+  <h1>MotoRoute <span>planner</span></h1><span style="font-size:10px;color:#bbb;background:#f0ede6;padding:2px 7px;border-radius:10px;">v0.12</span>
   <div class="sep"></div>
   <span style="font-size:10px;color:#bbb;">evita:</span>
   <button class="fbtn" id="f-mw">autostrade</button>
@@ -451,9 +451,18 @@ async function _doCalcRoute() {
   if (S.filters.motorway) av.push('highways');
   if (S.filters.toll)     av.push('tollways');
   if (S.filters.ferry)    av.push('ferries');
+  // Se ci sono soft in un tratto, l'utente sta correggendo la rotta manualmente
+  // → evita autostrade per quel tratto per non fare loop
+  // (viene passato come avoidFeatures al singolo calcTratto)
 
   // Calcola ogni tratto in parallelo
-  const results = await Promise.all(tratti.map(t => calcTratto(t, av)));
+  const results = await Promise.all(tratti.map(t => {
+    // Se il tratto ha soft (correzione manuale), evita autostrade per non fare loop
+    const tractAv = [...av];
+    if(t.softs.length>0 && !tractAv.includes('highways'))
+      tractAv.push('highways');
+    return calcTratto(t, tractAv);
+  }));
 
   // Verifica che tutti siano ok
   const allOk = results.every(r=>r!==null);
@@ -534,8 +543,7 @@ async function calcTratto(tratto, avoidFeatures) {
 
   const body = {
     coordinates: coords,
-    preference: S.filters.scenic ? 'shortest'
-             : (S.traceParams ? S.traceParams.preference : 'recommended'),
+    preference: S.filters.scenic ? 'shortest' : 'recommended',
     geometry: true,
     instructions: true,
     elevation: false,
@@ -544,9 +552,10 @@ async function calcTratto(tratto, avoidFeatures) {
   };
 
   // Penalizza highway anche quando non escluse — weight_factor basso = meno appeal
-  // Combina avoid da traccia importata e filtri manuali
+  // I filtri manuali SEMPRE prevalgono sulla traccia
+  // La traccia aggiunge solo avoid aggiuntivi se non già presenti
   const traceAvoid = S.traceParams ? S.traceParams.avoidFeatures : [];
-  const allAvoid = [...new Set([...traceAvoid, ...avoidFeatures])];
+  const allAvoid = [...new Set([...avoidFeatures, ...traceAvoid])];
   if(allAvoid.length) body.options = {avoid_features: allAvoid};
 
   try {
