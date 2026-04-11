@@ -90,6 +90,14 @@ body{font-family:system-ui,sans-serif;background:#f0ede6;color:#1a1a1a;height:10
 .sgr2{display:flex;justify-content:space-between;font-size:10px;padding:2px 0;color:#888;border-bottom:1px solid #f0ede6;}
 .sgr2:last-child{border:none;}
 .sgl{color:#bbb;min-width:32px;}
+.tratto-cfg{display:flex;gap:4px;padding:2px 0 5px 29px;flex-wrap:wrap;border-bottom:1px solid #f0ede6;}
+.tratto-cfg:last-child{border:none;}
+.tc-label{font-size:9px;color:#bbb;align-self:center;white-space:nowrap;}
+.tc-btn{font-size:9px;padding:1px 6px;border-radius:10px;border:1px solid #ddd;background:#f5f3ee;color:#666;cursor:pointer;font-family:inherit;transition:all 0.12s;}
+.tc-btn.on{background:#185FA5;color:#fff;border-color:#0C447C;}
+.tc-btn.on.scenic{background:#1D9E75;border-color:#0F6E56;}
+.tc-btn.on.fast{background:#BA7517;border-color:#854F0B;}
+.tc-sep-v{width:1px;height:14px;background:#e0ddd6;flex-shrink:0;align-self:center;}
 #map{flex:1;cursor:default;}
 #map.dragging-line{cursor:crosshair!important;}
 #ctx{position:fixed;z-index:9999;display:none;background:#fff;border:1px solid #ddd;border-radius:8px;padding:3px 0;min-width:185px;box-shadow:0 4px 14px rgba(0,0,0,0.12);}
@@ -104,7 +112,7 @@ body{font-family:system-ui,sans-serif;background:#f0ede6;color:#1a1a1a;height:10
 </head>
 <body>
 <div id="topbar">
-  <h1>MotoRoute <span>planner</span></h1><span style="font-size:10px;color:#bbb;background:#f0ede6;padding:2px 7px;border-radius:10px;">v0.17</span>
+  <h1>MotoRoute <span>planner</span></h1><span style="font-size:10px;color:#bbb;background:#f0ede6;padding:2px 7px;border-radius:10px;">v0.19</span>
   <div class="sep"></div>
   <span style="font-size:10px;color:#bbb;">evita:</span>
   <button class="fbtn" id="f-mw">autostrade</button>
@@ -212,6 +220,7 @@ const S = {
 function wps()  { return S.layers[S.active].wps; }
 function col()  { return S.layers[S.active].color; }
 function mkId() { return Math.random().toString(36).slice(2,9); }
+function defaultTratto(){return {preset:S.preset,motorway:S.filters.motorway,toll:S.filters.toll,ferry:S.filters.ferry};}
 function hard() { return wps().filter(w=>w.type!=='soft'); }
 
 // ═══════════════════════════════════════════════════════════════
@@ -275,13 +284,27 @@ function renderSB() {
         const iA=all.indexOf(wp), iB=all.indexOf(h[i+1]);
         if (iA>=0&&iB>iA) sc=all.slice(iA+1,iB).filter(w=>w.type==='soft').length;
       }
+      // Pannello configurazione tratto (mostrato sotto ogni tappa tranne l'ultima)
+      const isLast = hi===h.length-1;
+      const t = wp.tratto || defaultTratto();
+      const trattoHTML = !isLast ? `
+        <div class="tratto-cfg">
+          <span class="tc-label">tratto↓</span>
+          <button class="tc-btn ${t.preset==='fast'?'on fast':''}" onclick="setTratto('${wp._id}','preset','fast')">veloce</button>
+          <button class="tc-btn ${t.preset==='balanced'?'on':''}" onclick="setTratto('${wp._id}','preset','balanced')">bilanciato</button>
+          <button class="tc-btn ${t.preset==='scenic'?'on scenic':''}" onclick="setTratto('${wp._id}','preset','scenic')">panoramico</button>
+          <span class="tc-sep-v"></span>
+          <button class="tc-btn ${t.motorway?'on':''}" onclick="setTratto('${wp._id}','motorway',${!t.motorway})" title="evita autostrade">A</button>
+          <button class="tc-btn ${t.toll?'on':''}" onclick="setTratto('${wp._id}','toll',${!t.toll})" title="evita pedaggi">€</button>
+          <button class="tc-btn ${t.ferry?'on':''}" onclick="setTratto('${wp._id}','ferry',${!t.ferry})" title="evita traghetti">⛴</button>
+        </div>` : '';
       return `<div class="wh" draggable="true" data-id="${wp._id}">
         <span class="wdh">⠿</span>
         <div class="wp ${pinC}">${label}</div>
         <div class="wn" title="${wp.name}">${wp.name}</div>
         ${sc?`<span class="sg">${sc}g</span>`:''}
         ${canDel?`<button class="wd" onclick="removeHard('${wp._id}')">×</button>`:''}
-      </div>`;
+      </div>${trattoHTML}`;
     }).join('');
     initDrag();
   }
@@ -348,6 +371,13 @@ function removeHard(id) {
   refreshIcons(); renderSB(); calcRoute();
 }
 
+function setTratto(id,key,value){
+  const wp=wps().find(w=>w._id===id);
+  if(!wp) return;
+  if(!wp.tratto) wp.tratto=defaultTratto();
+  wp.tratto[key]=value;
+  renderSB(); calcRoute();
+}
 function removeSoft(id) {
   const all=wps(), idx=all.findIndex(w=>w._id===id);
   if (idx<0) return;
@@ -505,7 +535,9 @@ function addWp(latlng, type, pos) {
     icon: mkIcon(wpType,'?'), draggable:true,
     zIndexOffset: wpType==='soft'?-200:0
   }).addTo(map);
-  const wp = {latlng, type:wpType, name:`${latlng.lat.toFixed(4)},${latlng.lng.toFixed(4)}`, marker, _id:mkId()};
+  const wp = {latlng, type:wpType, name:`${latlng.lat.toFixed(4)},${latlng.lng.toFixed(4)}`, marker, _id:mkId(),
+    tratto: (wpType!=='soft') ? defaultTratto() : null
+  };
   marker.on('dragend', ()=>{ wp.latlng=marker.getLatLng(); revGeo(wp.latlng,wp); calcRoute(); });
   if (wpType==='soft') marker.on('dblclick', ()=>removeSoft(wp._id));
   if (isStart) {
@@ -558,11 +590,10 @@ async function _doCalcRoute() {
     const iA = all.indexOf(h[i]);
     const iB = all.indexOf(h[i+1]);
     const softs = all.slice(iA+1, iB).filter(w=>w.type==='soft');
-    tratti.push({
-      from: h[i],
-      to:   h[i+1],
-      softs
-    });
+    // Usa la config del waypoint di partenza del tratto
+    // Fallback al preset globale se non impostato
+    const cfg = h[i].tratto || defaultTratto();
+    tratti.push({from:h[i], to:h[i+1], softs, cfg});
   }
 
   // Avoid features dai filtri manuali dell'utente
@@ -572,7 +603,15 @@ async function _doCalcRoute() {
   if(S.filters.toll)     av.push('tollways');
   if(S.filters.ferry)    av.push('ferries');
 
-    const results = await Promise.all(tratti.map(t => calcTratto(t, av)));
+    // Ogni tratto usa la propria configurazione (preset + avoid)
+  const results = await Promise.all(tratti.map(t => {
+    const cfg = t.cfg;
+    const tractAv = [];
+    if(cfg.motorway) tractAv.push('highways');
+    if(cfg.toll)     tractAv.push('tollways');
+    if(cfg.ferry)    tractAv.push('ferries');
+    return calcTratto(t, tractAv, cfg.preset);
+  }));
 
   // Verifica che tutti siano ok
   const allOk = results.every(r=>r!==null);
@@ -613,7 +652,7 @@ async function _doCalcRoute() {
 }
 
 // Calcola un singolo tratto hard→hard con i suoi soft intermedi
-async function calcTratto(tratto, avoidFeatures) {
+async function calcTratto(tratto, avoidFeatures, tractPreset) {
   const pts = [tratto.from, ...tratto.softs, tratto.to];
 
   // Rimuovi punti duplicati o troppo vicini (< 50m) che causano 404
@@ -653,16 +692,17 @@ async function calcTratto(tratto, avoidFeatures) {
 
   // Parametri routing basati su preset + filtri manuali
   // Documentazione ORS: https://giscience.github.io/openrouteservice/api-reference/endpoints/directions/
-  const presetParams = {
-    fast:    {preference:'fastest',  maxSpeed:null},
-    balanced:{preference:'recommended', maxSpeed:null},
-    scenic:  {preference:'shortest', maxSpeed:70}
+  const presetPref = {
+    fast:    'fastest',
+    balanced:'recommended',
+    scenic:  'shortest'
   };
-  const pp = presetParams[S.preset] || presetParams.balanced;
+  // Usa il preset del tratto specifico, fallback al preset globale
+  const activePreset = tractPreset || S.preset;
 
   const body = {
     coordinates: coords,
-    preference: pp.preference,
+    preference: presetPref[activePreset] || 'recommended',
     geometry: true,
     instructions: true,
     elevation: false,
@@ -670,12 +710,10 @@ async function calcTratto(tratto, avoidFeatures) {
     language: 'it'
   };
 
-  if(pp.maxSpeed) body.maximum_speed = pp.maxSpeed;
-
   // Avoid features: filtri manuali espliciti
   // Per preset scenic aggiungi highways/tollways automaticamente
   const autoAvoid = [];
-  if(S.preset==='scenic') { autoAvoid.push('highways','tollways'); }
+  if(activePreset==='scenic') { autoAvoid.push('highways','tollways'); }
   const manualAvoid = [...avoidFeatures]; // passati dal chiamante
   const allAvoid = [...new Set([...manualAvoid, ...autoAvoid])];
   if(allAvoid.length) body.options = {avoid_features: allAvoid};
@@ -1017,7 +1055,7 @@ function addFS(idx, role) {
   const isStart=role==='start', isEnd=role==='end';
   const wpType=isStart?'start':isEnd?'end':role;
   const marker=L.marker(ll,{icon:mkIcon(wpType,'?'),draggable:true,zIndexOffset:wpType==='soft'?-200:0}).addTo(map);
-  const wp={latlng:ll,type:wpType,name,marker,_id:mkId()};
+  const wp={latlng:ll,type:wpType,name,marker,_id:mkId(),tratto:(wpType!=='soft')?defaultTratto():null};
   marker.on('dragend',()=>{ wp.latlng=marker.getLatLng(); revGeo(wp.latlng,wp); calcRoute(); });
   if (wpType==='soft') marker.on('dblclick',()=>removeSoft(wp._id));
   if (isStart) all.unshift(wp); else all.push(wp);
@@ -1144,7 +1182,7 @@ function parseImport(text,filename){
       const isFirst=i===0,isLast=i===named.length-1&&named.length>1;
       const wpType=isFirst&&!all.length?'start':isLast?'end':'hard';
       const marker=L.marker(w.latlng,{icon:mkIcon(wpType,'?'),draggable:true}).addTo(map);
-      const wp={latlng:w.latlng,type:wpType,name:w.name,marker,_id:mkId()};
+      const wp={latlng:w.latlng,type:wpType,name:w.name,marker,_id:mkId(),tratto:defaultTratto()};
       marker.on('dragend',()=>{ wp.latlng=marker.getLatLng(); revGeo(wp.latlng,wp); calcRoute(); });
       if(isFirst&&!all.length) all.unshift(wp); else all.push(wp);
     });
