@@ -104,7 +104,7 @@ body{font-family:system-ui,sans-serif;background:#f0ede6;color:#1a1a1a;height:10
 </head>
 <body>
 <div id="topbar">
-  <h1>MotoRoute <span>planner</span></h1><span style="font-size:10px;color:#bbb;background:#f0ede6;padding:2px 7px;border-radius:10px;">v0.12</span>
+  <h1>MotoRoute <span>planner</span></h1><span style="font-size:10px;color:#bbb;background:#f0ede6;padding:2px 7px;border-radius:10px;">v0.14</span>
   <div class="sep"></div>
   <span style="font-size:10px;color:#bbb;">evita:</span>
   <button class="fbtn" id="f-mw">autostrade</button>
@@ -162,8 +162,7 @@ body{font-family:system-ui,sans-serif;background:#f0ede6;color:#1a1a1a;height:10
   <div class="clbl">aggiungi tappa</div>
   <div class="ci" id="cx-s" style="color:#1D9E75;">▲ imposta partenza</div>
   <div class="ci" id="cx-e" style="color:#E24B4A;">▼ imposta arrivo</div>
-  <div class="ci" id="cx-h">● tappa obbligatoria</div>
-  <div class="ci" id="cx-g" style="color:#888;">● punto guida (soft)</div>
+  <div class="ci" id="cx-h">● aggiungi tappa qui</div>
 </div>
 <div id="hint">click dx → aggiunge tappa<br>trascina linea → punto guida<br>doppio click guida → elimina</div>
 <div id="toast"></div>
@@ -368,7 +367,96 @@ function revGeo(latlng, wp) {
   // Per i soft (punti tecnici) usa solo coordinate — evita chiamate inutili
   if (wp.type==='soft') {
     wp.name = `via ${latlng.lat.toFixed(3)},${latlng.lng.toFixed(3)}`;
-    renderSB();
+    // ═══════════════════════════════════════════════════════════════
+// EXPORT
+// ═══════════════════════════════════════════════════════════════
+document.getElementById('btn-gpx').onclick = async()=>{
+  const coords = S.routeCoords.length ? S.routeCoords : S.importedCoords;
+  if(!coords.length){toast('Calcola prima un percorso.');return;}
+  const layer=S.layers[S.active], h=hard(), now=new Date().toISOString();
+  const simplified = dpSimplify(coords, 0.00005);
+  let withElev = simplified;
+  try {
+    let elevPts = simplified;
+    if(elevPts.length>500){
+      const step=Math.ceil(elevPts.length/500);
+      const sampled=[elevPts[0]];
+      for(let i=step;i<elevPts.length-1;i+=step) sampled.push(elevPts[i]);
+      sampled.push(elevPts[elevPts.length-1]);
+      elevPts=sampled;
+    }
+    const body={
+      format_in:'geojson', format_out:'geojson',
+      geometry:{type:'LineString',coordinates:elevPts.map(p=>[parseFloat(p.lng.toFixed(6)),parseFloat(p.lat.toFixed(6))])}
+    };
+    const r=await fetch(ORS_ELEV,{
+      method:'POST',
+      headers:{'Content-Type':'application/json','Authorization':ORS_KEY},
+      body:JSON.stringify(body)
+    });
+    if(r.ok){
+      const d=await r.json();
+      const elCoords=d.geometry?.coordinates||[];
+      if(elCoords.length===elevPts.length){
+        if(elevPts.length===simplified.length){
+          withElev=simplified.map((p,i)=>({...p,ele:parseFloat((elCoords[i][2]||0).toFixed(1))}));
+        } else {
+          const step=Math.ceil(simplified.length/elevPts.length);
+          withElev=simplified.map((p,i)=>{
+            const si=Math.min(Math.floor(i/step),elCoords.length-1);
+            return {...p,ele:parseFloat((elCoords[si][2]||0).toFixed(1))};
+          });
+        }
+      }
+    }
+  } catch(e){console.warn('elevation skip',e);}
+
+  let gpx=`<?xml version="1.0" encoding="UTF-8"?>
+<gpx version="1.1" creator="MotoRoute Planner" xmlns="http://www.topografix.com/GPX/1/1">
+  <metadata><n>${layer.name}</n><time>${now}</time></metadata>
+`;
+  h.forEach((wp,i)=>{
+    const role=i===0?'Partenza':i===h.length-1?'Arrivo':`Tappa ${i}`;
+    const sym=i===0?'Flag, Green':i===h.length-1?'Flag, Red':'Flag, Blue';
+    gpx+=`  <wpt lat="${wp.latlng.lat.toFixed(6)}" lon="${wp.latlng.lng.toFixed(6)}"><n>${role}: ${wp.name}</n><sym>${sym}</sym></wpt>
+`;
+  });
+  gpx+=`  <trk><n>${layer.name}</n><trkseg>
+`;
+  withElev.forEach(pt=>{
+    gpx+=`    <trkpt lat="${pt.lat.toFixed(6)}" lon="${pt.lng.toFixed(6)}">${pt.ele!==undefined?`<ele>${pt.ele}</ele>`:''}</trkpt>
+`;
+  });
+  gpx+=`  </trkseg></trk>
+</gpx>`;
+  dl(gpx,'application/gpx+xml',`${layer.name.replace(/\s+/g,'-')}.gpx`);
+  toast(`GPX esportato — ${withElev.length} punti${withElev[0]?.ele!==undefined?' con quota':''}`);
+};
+
+document.getElementById('btn-kml').onclick = ()=>{
+  const all=wps();
+  if(all.length<2){toast('Aggiungi almeno 2 tappe.');return;}
+  const layer=S.layers[S.active];
+  let kml=`<?xml version="1.0" encoding="UTF-8"?>
+<kml xmlns="http://www.opengis.net/kml/2.2"><Document><n>${layer.name}</n>
+`;
+  all.forEach((wp,i)=>{
+    const lbl=i===0?'Partenza':i===all.length-1?'Arrivo':wp.type==='soft'?`Guida: ${wp.name}`:`Tappa: ${wp.name}`;
+    kml+=`  <Placemark><n>${lbl}</n><Point><coordinates>${wp.latlng.lng.toFixed(6)},${wp.latlng.lat.toFixed(6)},0</coordinates></Point></Placemark>
+`;
+  });
+  kml+=`</Document></kml>`;
+  dl(kml,'application/vnd.google-earth.kml+xml',`${layer.name.replace(/\s+/g,'-')}.kml`);
+  toast('KML esportato');
+};
+
+function dl(content,mime,filename){
+  const a=document.createElement('a');
+  a.href=URL.createObjectURL(new Blob([content],{type:mime}));
+  a.download=filename; a.click();
+}
+
+renderSB();
     return;
   }
   _geoQueue.push({latlng, wp});
@@ -409,7 +497,26 @@ function addWp(latlng, type, pos) {
   const wp = {latlng, type:wpType, name:`${latlng.lat.toFixed(4)},${latlng.lng.toFixed(4)}`, marker, _id:mkId()};
   marker.on('dragend', ()=>{ wp.latlng=marker.getLatLng(); revGeo(wp.latlng,wp); calcRoute(); });
   if (wpType==='soft') marker.on('dblclick', ()=>removeSoft(wp._id));
-  if (isStart) all.unshift(wp); else all.push(wp);
+  if (isStart) {
+    all.unshift(wp);
+  } else if (isEnd) {
+    all.push(wp);
+  } else if (wpType==='soft' && S.routeCoords.length>0) {
+    // Soft con rotta calcolata: inserisci nel segmento corretto
+    const insertIdx = findSegmentInsert(latlng, S.routeCoords, all);
+    all.splice(insertIdx, 0, wp);
+  } else if (wpType==='hard') {
+    // Hard: inserisci prima dell'arrivo se esiste
+    const h = hard();
+    if (h.length>=2) {
+      const arrIdx = all.indexOf(h[h.length-1]);
+      all.splice(arrIdx, 0, wp);
+    } else {
+      all.push(wp);
+    }
+  } else {
+    all.push(wp);
+  }
   revGeo(latlng, wp);
   refreshIcons(); renderSB(); calcRoute();
 }
@@ -551,9 +658,18 @@ async function calcTratto(tratto, avoidFeatures) {
     language: 'it'
   };
 
-  // Penalizza highway anche quando non escluse — weight_factor basso = meno appeal
-  // I filtri manuali SEMPRE prevalgono sulla traccia
-  // La traccia aggiunge solo avoid aggiuntivi se non già presenti
+  // Bearings per ogni waypoint — ORS rispetta la direzione lungo la rotta
+  // Evita inversioni (es. giro del lago dalla parte sbagliata)
+  if(filtered.length>=2 && S.routeCoords.length>0){
+    const bearings = filtered.map(w=>{
+      const b = polylineBearingAt(w.latlng, S.routeCoords);
+      // ORS vuole [valore, deviazione] oppure [] per "nessun vincolo"
+      return b!==null ? [Math.round(b), 60] : [];
+    });
+    body.bearings = bearings;
+  }
+
+  // Avoid: filtri manuali + traccia
   const traceAvoid = S.traceParams ? S.traceParams.avoidFeatures : [];
   const allAvoid = [...new Set([...avoidFeatures, ...traceAvoid])];
   if(allAvoid.length) body.options = {avoid_features: allAvoid};
@@ -683,6 +799,31 @@ function enableLineDrag(polyline) {
     map.on('mousemove', onMove);
     map.on('mouseup', onUp);
   });
+}
+
+// Calcola bearing (direzione 0-360) da punto A a punto B
+function calcBearing(lat1,lng1,lat2,lng2){
+  const dLng=(lng2-lng1)*Math.PI/180;
+  const la1=lat1*Math.PI/180, la2=lat2*Math.PI/180;
+  const y=Math.sin(dLng)*Math.cos(la2);
+  const x=Math.cos(la1)*Math.sin(la2)-Math.sin(la1)*Math.cos(la2)*Math.cos(dLng);
+  return (Math.atan2(y,x)*180/Math.PI+360)%360;
+}
+
+// Calcola il bearing della polyline nel punto più vicino a latlng
+function polylineBearingAt(latlng, routeCoords){
+  if(!routeCoords||routeCoords.length<2) return null;
+  let bestSeg=0, bestDist=Infinity;
+  for(let i=0;i<routeCoords.length-1;i++){
+    const a=routeCoords[i],b=routeCoords[i+1];
+    const dx=b.lng-a.lng,dy=b.lat-a.lat;
+    if(!dx&&!dy) continue;
+    const t=Math.max(0,Math.min(1,((latlng.lat-a.lat)*dy+(latlng.lng-a.lng)*dx)/(dx*dx+dy*dy)));
+    const d=haversine(latlng.lat,latlng.lng,a.lat+t*dy,a.lng+t*dx);
+    if(d<bestDist){bestDist=d;bestSeg=i;}
+  }
+  const a=routeCoords[bestSeg],b=routeCoords[Math.min(bestSeg+1,routeCoords.length-1)];
+  return calcBearing(a.lat,a.lng,b.lat,b.lng);
 }
 
 // Snappa un punto alla polyline — proietta latlng sul segmento più vicino
@@ -826,7 +967,6 @@ document.addEventListener('click', ()=>document.getElementById('ctx').style.disp
 document.getElementById('cx-s').onclick = ()=>{ if(ctxLL) addWp(ctxLL,'start','start'); };
 document.getElementById('cx-e').onclick = ()=>{ if(ctxLL) addWp(ctxLL,'end','end'); };
 document.getElementById('cx-h').onclick = ()=>{ if(ctxLL) addWp(ctxLL,'hard'); };
-document.getElementById('cx-g').onclick = ()=>{ if(ctxLL) addWp(ctxLL,'soft'); };
 
 // ═══════════════════════════════════════════════════════════════
 // SEARCH
